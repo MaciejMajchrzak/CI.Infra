@@ -1,6 +1,6 @@
 # CodingInnovators Platform — Architecture
 
-> Last updated: 2026-08-03
+> Last updated: 2026-08-03 (session 3)
 
 ---
 
@@ -29,6 +29,8 @@ Platform/
   CI.Platform.Workflow          ← business process orchestration (see below)
   CI.Platform.DevTools          ← dev bar, API keys, webhook config, event log, event replay
   CI.Platform.CountryConfig     ← country law matrix — taxes, legal forms, identifiers (see below)
+  CI.Platform.Notifications     ← delivery: SMTP, SMS, push — all modules publish send commands, this delivers
+  CI.Platform.Documents         ← PDF generation + email/document template rendering (used by Invoicing, Booking, Legal)
   CI.Platform.Search            ← OpenSearch abstraction, index management (see below)
   CI.Platform.PublicDiscovery   ← aggregated read-only DB for public booking search (see below)
 
@@ -42,11 +44,14 @@ Modules/  (business domains — per-tenant, each has own DB)
   CI.Module.Warehouse           ← stock, movements, reservations
   CI.Module.HR                  ← employees, payroll (contracts live in Legal)
   CI.Module.Tasks               ← work tasks, projects, backlog, time logs
-  CI.Module.Accounting          ← obligations, tax calendar
+  CI.Module.Accounting          ← chart of accounts, double-entry ledger, KPiR, bank reconciliation, fixed assets, depreciation
+  CI.Module.Marketing           ← loyalty points, promo codes, gift vouchers, campaigns, staff commissions
 
 Connectors/  (no own DB — consume module events, talk to external APIs)
   CI.Connector.Slack
   CI.Connector.ComarchOptima
+  CI.Connector.KSeF             ← PL mandatory e-invoicing (KSeF government API)
+  CI.Connector.OpenBanking      ← bank feed / statement import (adapters per bank/provider)
   ...
 
 CI.Infra                        ← Docker Compose, Helm, k8s, reusable GitHub Actions
@@ -99,11 +104,10 @@ CI.Platform.<Name>/
 Business logic never knows how it was called.
 
 ```
-HTTP Controller   ──┐
-RabbitMQ Consumer ──┤
-Webhook Receiver  ──┼──► Command ──► CommandHandler ──► Result + Event
-Workflow Engine   ──┤
-Scheduler         ──┘
+HTTP Controller        ──┐
+RabbitMQ Consumer      ──┤
+Webhook Receiver       ──┼──► Command ──► CommandHandler ──► Result + Event
+Workflow (any step)    ──┘   ← includes timer steps — there is no separate Scheduler service
 ```
 
 **Rule:** If it changes state → `ICommand` → handler publishes an event OR carries `[NoEvent("reason")]`.
@@ -230,8 +234,19 @@ CountryConfig
   ├── TaxIdentifierType[]        — code, name, validationPattern, isRequired, appliesTo (Org/Individual/Both)
   │                                 e.g. PL: NIP, REGON, KRS, PESEL | DE: Steuernummer, USt-IdNr
   │
-  ├── VatRate[]                  — name, ratePercent, validFrom, validTo, isReduced, status (Past/Current/Planned)
+  ├── ConsumptionTaxRate[]       — name, ratePercent, validFrom, validTo, isReduced, status (Past/Current/Planned)
+  │                                 jurisdictionLevel? (National/State/County/City), jurisdictionCode? (e.g. "US-CA")
   │                                 temporal — past rates stored for invoice history, planned for forward-dating
+  │                                 what countries call it: VAT (EU), GST (AU/NZ/CA/IN), Sales Tax (US), TVA (FR)
+  │                                 jurisdictionLevel/Code nullable — EU/PL/GB national-only; US needs per-state
+  │
+  ├── IncomeTaxScheme[]          — code, name, type (Progressive|Flat|LumpSum|Other)
+  │     └── IncomeTaxSchemeRate[]
+  │           activityCode?, minIncome?, maxIncome?, ratePercent, description
+  │           Progressive: income bracket bands (ThresholdAmount + RatePercent per band)
+  │           Flat: single rate entry, no activityCode
+  │           LumpSum (ryczałt): one rate per activity/PKD code — e.g. IT=12%, catering=3%, rental=8.5%
+  │           A sole trader can operate under TWO LumpSum rates simultaneously (two activities)
   │
   ├── TaxObligation[]            — code, name, type (Income/Social/Health/VAT/Customs/Other), description
   │     └── TaxObligationComponent[]
@@ -244,10 +259,36 @@ CountryConfig
   ├── AddressFormat[]            — fieldName, label, isRequired, sortOrder
   │                                 drives address entry forms per country
   │
-  └── EntityFieldDefinition[]    — entityType (Invoice/Party/Contract/...), fieldKey, label,
-                                     dataType (String/Decimal/Date/Boolean), isRequired, validationPattern
-                                     drives country-specific fields on entities via typed EAV
+  ├── EntityFieldDefinition[]    — entityType (Invoice/Party/Contract/...), fieldKey, label,
+  │                                 dataType (String/Decimal/Date/Boolean), isRequired, validationPattern
+  │                                 drives country-specific fields on entities via typed EAV
+  │
+  ├── CountryFilingCapability[]  — filingType (JPK_V7/SAF-T/MTD/1099/...), isMandatory, mandatoryFrom?, description
+  │                                 which tax export formats this country requires → drives which connectors to activate
+  │
+  └── CountryEInvoiceCapability[]— systemName (KSeF/FatturaPA/MakingTaxDigital/...), isMandatory, mandatoryFrom?
+                                     whether structured e-invoicing is mandatory and from when
 ```
+
+### Country Plugin — computation that cannot be generic
+
+Rates and legal forms are **data** (CountryConfig). Calculation logic and filing formats are **code** (ICountryPlugin).
+
+```csharp
+// In CI.Kernel — all modules can reference this interface
+public interface ICountryPlugin
+{
+    string CountryCode { get; }
+    Task<IReadOnlyList<TaxObligationAmount>> CalculateMonthlyObligationsAsync(TenantContext ctx, YearMonth period, CancellationToken ct);
+    Task SubmitEInvoiceAsync(Invoice invoice, CancellationToken ct);
+    Task<FilingExport> ExportFilingAsync(string filingType, DateRange period, CancellationToken ct);
+}
+```
+
+Implementations: `PolandCountryPlugin`, `GermanyCountryPlugin`, `UKCountryPlugin`, etc.
+Registered in DI as `IEnumerable<ICountryPlugin>`, resolved by `CountryCode` at call time.
+**Adding a new country = seed CountryConfig rows + write one country plugin class.**
+Generic code never references specific countries — only `CountryCode` strings.
 
 ### Country-specific entity fields — typed EAV (no JSON)
 
@@ -404,7 +445,7 @@ Resource
   BookingMode: FullOnly | ByPersonOnly | Mixed
   Capacity (int)              — max concurrent bookings (persons or sessions)
   IsAvailable (bool)
-  SeniorityLevel?             — for Staff: Junior | Mid | Senior | Expert
+  EmployeeId?: Guid?          — nullable link to CI.Module.HR Employee (seniority, skills live there)
   RowVersion
 
 ResourceServiceConfig[]       — override per (Resource × Service) combination
@@ -452,6 +493,22 @@ AppointmentAcceptance[]       — signed consent forms (aggregate child)
   AppointmentId, ServiceAcceptanceId, Title (snapshot), SignedAt, SignerName
 ```
 
+### Stay — grouping multiple appointments under one visit
+
+A `Stay` links any number of independent `Appointment` records together. Used for hotel stays (room + spa + breakfast), multi-day retreat bookings, or any scenario where a guest makes multiple appointments that should be billed and managed together.
+
+```
+Stay
+  Id, TenantId, BranchId
+  CustomerId (Guid), CustomerName (snapshot), CustomerEmail (snapshot)
+  CheckIn (date), CheckOut (date)
+  Notes?
+  Status: Active | CheckedOut | Cancelled
+  RowVersion
+```
+
+`Appointment` gets a nullable `StayId: Guid?` FK. A standalone appointment (beauty salon, barber) has `StayId = null`. A hotel room appointment and a spa appointment during the same visit both have the same `StayId`. Payment links to `StayId` (single bill for the whole stay) or to individual `AppointmentId` (pay per service).
+
 ### Bundle booking
 
 ```
@@ -489,37 +546,48 @@ On booking changes, `BranchPublishedEvent` / `BranchUpdatedEvent` / `BranchRemov
 
 ---
 
-## CI.Module.Payments — Stripe Architecture
+## CI.Module.Payments — Generic Payment Provider Architecture
 
-Three Stripe integration modes co-exist:
+No provider-specific fields in domain entities. The provider is a plugin — swap Stripe for Mollie, Przelewy24, or Adyen by changing one registration.
 
-| Mode | When | Entity |
-|---|---|---|
-| **Stripe standard** | Tenant collects payment directly | `StripeCustomer` (TenantId, CustomerId, Email) |
-| **Stripe Connect** | Platform facilitates, takes a fee | `StripeConnectAccount` (TenantId, BranchId, AccountId, ChargesEnabled) |
-| **Stripe Tap to Pay** | In-person terminal on phone | `StripeTerminalReader` (TenantId, ReaderId, Label, Location) |
+```csharp
+// In CI.Kernel — all modules can reference this
+public interface IPaymentProvider
+{
+    string ProviderName { get; }  // "stripe" | "mollie" | "przelewy24" | "adyen" | ...
+    Task<PaymentResult>    CreatePaymentAsync(PaymentRequest req, CancellationToken ct);
+    Task<PaymentResult>    CreateMarketplacePaymentAsync(MarketplacePaymentRequest req, CancellationToken ct);
+    Task<PaymentResult>    CreateTerminalPaymentAsync(TerminalPaymentRequest req, CancellationToken ct);
+    Task<RefundResult>     RefundAsync(string providerTransactionRef, decimal amount, string reason, CancellationToken ct);
+    Task                   HandleWebhookAsync(string payload, string signature, CancellationToken ct);
+}
+```
+
+Three modes are always available regardless of provider (Standard, Marketplace, InPerson). Each provider exposes all three — if a provider doesn't support one mode, it throws `NotSupportedException`.
 
 ```
 PaymentTransaction
   Id, TenantId
   Amount, Currency
   Status: Pending | Processing | Completed | Failed | Refunded | Disputed
-  Mode: Standard | Connect | Terminal
-  StripePaymentIntentId?
-  StripeConnectAccountId?     — for Connect mode
-  StripeTerminalReaderId?     — for Terminal mode
-  PlatformFeeAmount?          — platform cut in Connect mode
-  TransferAmount?             — amount going to the connected account
+  Method: Card | BankTransfer | Cash | Terminal | Voucher | LoyaltyPoints | Other
+  Mode: Standard | Marketplace | InPerson
+  ProviderName               — "stripe", "mollie", "przelewy24", "adyen", ...
+  ProviderTransactionRef     — provider's own ID (PaymentIntent ID, order ID, etc.)
+  ProviderAccountRef?        — for Marketplace: sub-account / connected merchant ID
+  PlatformFeeAmount?         — platform cut in Marketplace mode
+  TransferAmount?            — amount going to the merchant in Marketplace mode
   LinkedAppointmentId?
+  LinkedStayId?              — for hotel-style: link to Stay instead of one appointment
   LinkedInvoiceId?
   FailureReason?
   RowVersion
 
-Refund[]                      — aggregate child
+Refund[]                     — aggregate child
   PaymentTransactionId
   Amount, Reason
   Status: Pending | Approved | Rejected
-  StripeRefundId?
+  ProviderRefundRef?         — provider's own refund ID
 ```
 
 ---
@@ -566,6 +634,59 @@ CompensationLog               — rollback audit trail
 - **Rerun whole** → new Instance from same Definition, preserves original TriggerPayload
 - **Rerun step** → only on Failed steps; resets that StepExecution, re-executes from that node
 - **Rollback (saga)** → walks backwards through `Succeeded` steps, runs each `CompensationStep` in reverse order, records in `CompensationLog`
+
+### Node types — parallel execution and fire-and-forget
+
+```
+WorkflowNode.Type:
+  Task          — call a handler, HTTP endpoint, or publish an event
+  Condition     — if/else branch based on step output
+  Timer         — WaitUntil(datetime) or WaitFor(duration)
+  Signal        — wait for external input: human approval or webhook callback
+  ParallelFork  — split into N concurrent branches, each runs independently
+  ParallelJoin  — wait for branches before continuing; WaitFor: All | Any | N-of-M
+```
+
+```
+WorkflowNode (additional fields)
+  IsFireAndForget (bool)  — failure → Warning status; workflow continues regardless
+  ContinueOnWarning (bool)— ParallelJoin does not block on fire-and-forget branches
+```
+
+How it works — like GitHub Actions jobs:
+```
+  Task: charge payment
+    → ParallelFork (3 branches)
+        Branch A: send email      IsFireAndForget=true  ← failure = Warning, never blocks
+        Branch B: send SMS        IsFireAndForget=true
+        Branch C: update PublicDiscovery
+    → ParallelJoin (WaitFor=All, skips fire-and-forget branches)
+  → Task: mark appointment Confirmed
+```
+
+Fan-in with partial wait — `ParallelJoin(WaitFor=Any)` continues as soon as the first branch completes; `WaitFor=N` requires N of M. Useful for: "wait for payment confirmation OR manual override signal, whichever comes first."
+
+### Timer steps — no separate Scheduler service
+
+Time-based triggers are Workflow steps. There is no `CI.Platform.Scheduler`.
+
+Supported timer step types:
+- **WaitUntil(datetime)** — pause instance until an absolute moment (e.g. `appointment.StartAt − 24h`)
+- **WaitFor(duration)** — pause for a relative duration (e.g. 90 days to detect lapsed clients)
+
+```
+WorkflowTimer                 — one row per waiting timer step
+  InstanceId, StepId
+  FireAt (datetime, indexed)
+  Status: Waiting | Fired | Cancelled
+```
+
+A background poller queries `WHERE FireAt <= now AND Status = Waiting`, fires each due timer, and resumes the workflow instance from that step. Persists across service restarts — no in-memory timers, no cron.
+
+Examples of what this replaces a separate scheduler with:
+- Appointment reminder → `AppointmentConfirmed` starts workflow → `WaitUntil(StartAt − 24h)` → send notification
+- Lapsed client → `AppointmentCompleted` starts workflow → `WaitFor(90 days)` → check if rebooked → if not, send campaign
+- Birthday voucher → `CustomerCreated` starts workflow → `WaitUntil(nextBirthday − 7 days)` → send voucher
 
 ### Real-time UI — SignalR
 
@@ -666,6 +787,21 @@ PublishedAvailability
 Publish flow: `BranchPublishedEvent` → `PublicDiscoveryConsumer` → upsert `PublishedBranch` + push to OpenSearch `branches` index.
 Delete flow: `BranchRemovedEvent` → delete from PublishedBranch + remove from OpenSearch.
 
+### Availability — event-driven primary, scheduled reconciliation
+
+`PublishedAvailability` is **not** maintained only by a background worker. Every booking change updates it immediately via dedicated event consumers:
+
+| Event | Consumer action |
+|---|---|
+| `BookingCreatedEvent` | Decrement available slots for that service + date |
+| `BookingCancelledEvent` | Increment available slots |
+| `BookingCompletedEvent` | Mark slot as used (historical) |
+| `ServiceUpdatedEvent` | Recalculate affected date range |
+| `ResourceBlockedEvent` | Mark resource unavailable for blocked period |
+| `OpeningHoursChangedEvent` | Recalculate affected dates |
+
+`AvailabilityWorker` runs as a **reconciliation job** (nightly or on-demand) to catch any drift from missed events or race conditions. It is NOT the primary update path.
+
 ---
 
 ## CI.Module.Catalog — Goods vs Products vs Services
@@ -690,6 +826,189 @@ All three share:
 - `PriceHistory[]` — validFrom, validTo, price, currency
 - `CategoryId?` — shared `CatalogCategory` tree
 - `Image[]`
+
+---
+
+## CI.Platform.Notifications — Real Delivery Layer
+
+Notification *modelling* (when to send, to whom) lives per-module or in Workflow timer steps.
+CI.Platform.Notifications is the **delivery service** — receives send commands and dispatches to the right channel.
+
+| Channel | Provider |
+|---|---|
+| Email (SMTP) | Resend / Mailgun / SES — tenant brings own or uses platform default |
+| SMS | Twilio / Vonage |
+| Push (FCM/APNs) | Firebase (Android), APNs (iOS) |
+| In-app | SignalR hub in CI.Platform.Workflow |
+
+```csharp
+// Any module publishes this — Notifications service consumes it
+record SendNotificationCommand(
+    Guid TenantId,
+    string Channel,        // "email" | "sms" | "push" | "in-app"
+    string Recipient,      // email address, phone number, device token, or userId
+    string TemplateKey,    // maps to a template in CI.Platform.Documents
+    object TemplateData,   // key-value bag passed to template renderer
+    string? IdempotencyKey // prevents duplicates on retry
+) : ICommand;
+```
+
+```
+NotificationLog               — append-only delivery record
+  TenantId, Channel, Recipient, TemplateKey
+  Status: Queued | Sent | Failed
+  SentAt?, FailureReason?, IdempotencyKey?
+```
+
+---
+
+## CI.Platform.Documents — PDF Generation + Template Rendering
+
+Used by: Invoicing (invoice PDFs), Booking (confirmation emails), Legal (contract PDFs), Notifications (email bodies).
+
+- Renders Handlebars templates for email subjects and bodies
+- Renders HTML → PDF (headless Chromium) for invoices, contracts, reports
+- Tenants can override platform default templates with their own branded versions
+
+```
+DocumentTemplate
+  Id, TenantId? (null = platform default), Key, Type: Email | PDF | Preview
+  SubjectTemplate?    — for email channel only (Handlebars)
+  BodyTemplate        — Handlebars string
+  LanguageCode        — "pl", "en", "de", etc.
+  IsDefault           — true on platform defaults, false on tenant overrides
+  RowVersion
+```
+
+**Rule:** PDF rendering is async (Workflow step) for documents > 1 page; synchronous for previews and confirmation emails.
+
+---
+
+## CI.Module.Marketing — Loyalty, Campaigns, Vouchers, Commissions
+
+Isolated from Booking because these features will also apply to future Catalog/e-commerce.
+Booking, Invoicing, and Catalog push events → Marketing consumes them → awards points, triggers campaigns.
+
+### Entity model
+
+```
+// Loyalty
+LoyaltyProgram
+  Id, TenantId, BranchId?
+  PointsPerCurrencyUnit   — e.g. 1.0 = 1 point per 1 PLN
+  PointsExpiryDays?
+LoyaltyTier[]
+  ProgramId, Name, MinPoints, BenefitType (DiscountPercent|FreeService|PriorityBooking|FreeCancel), BenefitValue?
+CustomerLoyaltyBalance
+  TenantId, CustomerId, ProgramId, Points, LifetimePoints, CurrentTierName
+LoyaltyTransaction          — append-only
+  CustomerId, ProgramId, PointsDelta, Reason (Earned|Redeemed|Expired|Adjusted)
+  LinkedAppointmentId?, LinkedInvoiceId?, OccurredAt
+
+// Gift vouchers
+Voucher
+  Id, TenantId, Code (unique), Type: GiftCard | ServiceCredit | DiscountPercent | DiscountFixed
+  Value, Currency, ExpiresAt?, MaxUses?, UsedCount
+  Status: Active | Exhausted | Expired | Revoked
+  LinkedCampaignId?
+VoucherRedemption           — append-only
+  VoucherId, CustomerId, RedeemedAt, AmountUsed, LinkedAppointmentId?, LinkedInvoiceId?
+
+// Promo codes
+PromoCode
+  Id, TenantId, Code, Type: DiscountPercent | DiscountFixed | FreeService
+  Value, ValidFrom, ValidTo?, MaxUses?, UsedCount, MinOrderAmount?
+  AppliesTo: All | ServiceCategory | SpecificService, AppliesToId?
+
+// Campaigns (orchestrated by Workflow timer steps)
+Campaign
+  Id, TenantId, BranchId?
+  Type: Birthday | LapsedClient | Manual | LastMinuteDiscount
+  Status: Draft | Scheduled | Running | Completed | Cancelled
+  TargetSegment: AllCustomers | LoyaltyTier | CustomTag, SegmentValue?
+  Channel: Email | SMS | Push
+  TemplateKey               — → CI.Platform.Documents
+  VoucherId?                — optional reward attached
+  ScheduledAt?, ExecutedAt?
+CampaignRecipient           — append-only
+  CampaignId, CustomerId, Status: Queued | Sent | Failed, SentAt?
+
+// Staff commissions
+CommissionRule
+  Id, TenantId, ResourceId (Staff type only)
+  Type: PercentOfRevenue | FixedPerAppointment, Value
+  AppliesTo: All | SpecificService, AppliesToId?
+CommissionEntry             — append-only
+  ResourceId, AppointmentId, Amount, CalculatedAt
+  Status: Pending | Approved | Paid
+```
+
+---
+
+## CI.Module.Accounting — Scope
+
+The largest domain gap vs Xero and Comarch. Accounting is **separate from Invoicing** — Invoicing is a document store; Accounting reads from it via events.
+
+**Rule:** Accounting never queries Invoicing or Payments DBs directly. It consumes `InvoiceIssuedEvent`, `PaymentCompletedEvent`, etc. and creates its own journal entries.
+
+```
+// Chart of accounts
+AccountPlan                   — one per tenant
+ChartAccount
+  Id, TenantId, Code, Name, Type (Asset|Liability|Equity|Revenue|Expense)
+  IsSystemAccount, ParentId?
+
+// Double-entry ledger
+JournalEntry                  — immutable once posted
+  Id, TenantId, PostedAt, Description
+  LinkedInvoiceId?, LinkedPaymentId?, LinkedExpenseId?
+JournalLine[]                 — two or more; sum(Debit) must equal sum(Credit)
+  EntryId, AccountCode, Debit?, Credit?, Description?
+  ActivityCode?               — for ryczałt: tags which IncomeTaxSchemeRate applies (e.g. "pl-pkd-6201" → IT 12%)
+                                null for non-LumpSum tenants; PolandCountryPlugin reads it for tax calculation
+
+// KPiR (Polish simplified bookkeeping) is NOT a separate entity.
+// It is an export format generated on demand:
+//   PolandCountryPlugin.ExportFilingAsync("kpir", period) reads JournalEntry rows
+//   and formats them per the legal KPiR template. Same pattern as JPK_V7.
+
+// Live analytics — no separate reporting module
+FinancialDaySummary           — one row per (TenantId, Date); updated on every write event
+  TenantId, Date
+  Revenue, Costs, VatCollected, VatPaid, NetIncome
+  UpdatedAt
+// Hours/days/weeks/months/years = range query on Date, no runtime aggregation.
+// Tax simulation (zasady ogólne vs liniowy vs ryczałt) and legal-form comparison
+// are pure calculations: PolandCountryPlugin.SimulateTaxScenariosAsync(tenantId, year)
+// runs different formulas over FinancialDaySummary — no new storage needed.
+
+// Expenses
+ExpenseClaim
+  Id, TenantId, SubmittedBy (UserId), Date, Description, Category
+  Amount, Currency, VatAmount?
+  Status: Draft | Submitted | Approved | Rejected | Reimbursed
+  ReceiptUrl?
+MileageRecord
+  Id, TenantId, UserId, Date, Km (decimal), PurposeDescription
+  RatePerKm (snapshot from CountryConfig), Amount
+
+// Fixed assets
+FixedAsset
+  Id, TenantId, Name, Category, PurchaseDate, PurchaseValue, Currency
+  DepreciationMethod: StraightLine | Declining
+  UsefulLifeMonths, CurrentBookValue, LastDepreciatedAt
+  IsDisposed, DisposedAt?
+DepreciationEntry             — append-only
+  AssetId, Period (YYYY-MM), Amount, BookValueAfter
+
+// Bank reconciliation
+BankAccount
+  Id, TenantId, IBAN, BankName, Currency, CurrentBalance, LastSyncedAt?
+BankTransaction               — imported, append-only
+  AccountId, TenantId, ValueDate, Amount, Currency, Description
+  Status: Unmatched | Matched | Ignored
+  MatchedInvoiceId?, MatchedPaymentId?
+```
 
 ---
 
@@ -849,3 +1168,23 @@ Test credentials: `test / test` on `ci-platform` realm.
 | 2026-08-03 | Workflow step states include Warning and Compensated | Real pipelines produce warnings (not just pass/fail); saga pattern needs compensation state |
 | 2026-08-03 | WorkflowSignal entity for human-approval steps | External actor resumes the workflow; not a timer — genuinely async wait |
 | 2026-08-03 | Frontend clients (Portal/Mobile/Public) removed from scope | User decision |
+| 2026-08-03 | No CI.Platform.Scheduler — timer steps live in CI.Platform.Workflow | Workflow already owns instance state; a separate timer service would be a second place to track the same lifecycle |
+| 2026-08-03 | WorkflowTimer entity with FireAt index + background poller | Persists timers across restarts; WaitUntil and WaitFor as first-class step types |
+| 2026-08-03 | VatRate gets jurisdictionLevel + jurisdictionCode (nullable) | US has state/county/city sales tax; EU countries have national-only rates; same entity covers both |
+| 2026-08-03 | ICountryPlugin interface for computation that cannot be generic | Config (CountryConfig) drives UI/validation; plugins drive ZUS calculation, JPK export, KSeF submission — adding a country = seed data + one plugin class |
+| 2026-08-03 | CountryFilingCapability + CountryEInvoiceCapability as CountryConfig children | Drives which connectors to activate per country — declarative not hardcoded |
+| 2026-08-03 | CI.Platform.Notifications as dedicated delivery service | All modules publish SendNotificationCommand; one service handles SMTP/SMS/push delivery and idempotency |
+| 2026-08-03 | CI.Platform.Documents for PDF + Handlebars template rendering | Shared by Invoicing, Booking, Legal, Notifications; tenants can override platform default templates |
+| 2026-08-03 | CI.Module.Marketing isolated from Booking | Loyalty/campaigns/vouchers will also apply to Catalog and future e-commerce — not a Booking-specific concern |
+| 2026-08-03 | CI.Module.Accounting is double-entry ledger + KPiR + bank reconciliation + fixed assets | Largest domain gap vs Xero/Comarch; reads Invoicing and Payments via events only — never cross-queries their DBs |
+| 2026-08-03 | Accounting consumes events from Invoicing and Payments, never queries their DBs | Module isolation rule applied to accounting — InvoiceIssuedEvent → journal entry |
+| 2026-08-03 | VatRate renamed to ConsumptionTaxRate; IncomeTaxScheme is a separate entity | VAT/GST and income tax are fundamentally different — one goes on transactions, the other on the tenant's annual tax form |
+| 2026-08-03 | IncomeTaxScheme supports Progressive/Flat/LumpSum with per-activity rates | Ryczałt can have two rates simultaneously (e.g. IT 12% + catering 3%) — ActivityCode on JournalLine tags which rate applies |
+| 2026-08-03 | KPiRRecord removed — KPiR is a PolandCountryPlugin export of JournalEntry | Not a domain entity; generated on demand from existing accounting data |
+| 2026-08-03 | FinancialDaySummary projection replaces a separate reporting module | Event-driven daily row covers hours/days/weeks/months/years with range queries; no runtime aggregation |
+| 2026-08-03 | Tax simulation and legal-form comparison are pure calculations, no storage | ICountryPlugin.SimulateTaxScenariosAsync reads FinancialDaySummary and runs multiple formulas |
+| 2026-08-03 | SeniorityLevel removed from Resource; EmployeeId? nullable FK to HR added | Seniority, skills, qualifications live in HR — Resource is the bookable slot only |
+| 2026-08-03 | Stay entity groups multiple Appointments under one visit | Enables hotel room + spa + breakfast under one stay/bill; standalone appointments have StayId = null |
+| 2026-08-03 | PaymentTransaction uses ProviderName + ProviderTransactionRef (no Stripe fields) | IPaymentProvider plugin pattern — swap Stripe for Mollie/Przelewy24/Adyen with one DI change |
+| 2026-08-03 | WorkflowNode adds ParallelFork, ParallelJoin (All/Any/N-of-M), IsFireAndForget | Email failure must not cancel a booking — fire-and-forget = Warning, not Failure |
+| 2026-08-03 | PublicDiscovery availability is event-driven; AvailabilityWorker is reconciliation only | Every booking change must reflect immediately in public availability — scheduled worker only catches drift |
