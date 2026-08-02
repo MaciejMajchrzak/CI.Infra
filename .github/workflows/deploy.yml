@@ -74,8 +74,8 @@ jobs:
             # ssl_required defaults to EXTERNAL — must be NONE for HTTP dev access
             echo "Waiting for Keycloak..."
             for i in $(seq 1 18); do
-              if docker exec ci-postgres psql -U ci -d ci_keycloak -c "SELECT 1 FROM realm WHERE id='master'" 2>/dev/null | grep -q "1 row"; then
-                docker exec ci-postgres psql -U ci -d ci_keycloak -c "UPDATE realm SET ssl_required='NONE' WHERE id='master';" && echo "Realm patched." && break
+              if docker exec ci-postgres psql -U ci -d ci_keycloak -c "SELECT 1 FROM realm WHERE name='master'" 2>/dev/null | grep -q "1 row"; then
+                docker exec ci-postgres psql -U ci -d ci_keycloak -c "UPDATE realm SET ssl_required='NONE' WHERE name='master';" && echo "Realm patched." && break
               fi
               echo "  attempt $i/18 — waiting 5s..."
               sleep 5
