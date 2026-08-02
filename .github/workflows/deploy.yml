@@ -61,8 +61,8 @@ jobs:
             # Login to GHCR so docker can pull private images
             echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
 
-            # Wipe current state (volumes kept for postgres data unless --volumes is added)
-            docker compose down --remove-orphans || true
+            # Wipe current state including postgres volume so init-db.sh always runs clean
+            docker compose down --volumes --remove-orphans || true
 
             # Pull latest images
             docker compose pull
