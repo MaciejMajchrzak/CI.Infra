@@ -2,6 +2,7 @@ name: CI NuGet Pipeline
 
 on:
   workflow_call:
+  workflow_dispatch:
     inputs:
       package-project:
         description: 'Path to the .csproj to pack, e.g. src/CI.Kernel/CI.Kernel.csproj'
