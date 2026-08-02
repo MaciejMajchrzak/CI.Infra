@@ -202,6 +202,7 @@ services:
     ports:
       - "80:8080"
     environment:
+      ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:8080
       Keycloak__Authority: http://keycloak:8080/realms/ci-platform
       Keycloak__Audience: account
