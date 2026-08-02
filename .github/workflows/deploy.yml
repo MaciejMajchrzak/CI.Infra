@@ -1,0 +1,74 @@
+name: Deploy to Droplet
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docker-compose.yml
+      - init-db.sh
+      - monitoring/**
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy stack to droplet
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy compose files to droplet
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          source: "docker-compose.yml,init-db.sh,monitoring/"
+          target: /opt/ci-platform
+
+      - name: Deploy
+        uses: appleboy/ssh-action@v1
+        env:
+          POSTGRES_PASSWORD:       ${{ secrets.POSTGRES_PASSWORD }}
+          RABBITMQ_PASSWORD:       ${{ secrets.RABBITMQ_PASSWORD }}
+          KEYCLOAK_ADMIN_PASSWORD: ${{ secrets.KEYCLOAK_ADMIN_PASSWORD }}
+          GRAFANA_PASSWORD:        ${{ secrets.GRAFANA_PASSWORD }}
+          OPENBAO_ROOT_TOKEN:      ${{ secrets.OPENBAO_ROOT_TOKEN }}
+          GHCR_TOKEN:              ${{ secrets.PACKAGES_TOKEN }}
+          GHCR_USER:               MaciejMajchrzak
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          envs: POSTGRES_PASSWORD,RABBITMQ_PASSWORD,KEYCLOAK_ADMIN_PASSWORD,GRAFANA_PASSWORD,OPENBAO_ROOT_TOKEN,GHCR_TOKEN,GHCR_USER
+          script: |
+            set -e
+            cd /opt/ci-platform
+
+            # Write .env from secrets (never stored in repo)
+            cat > .env << EOF
+            POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+            RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
+            KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD}
+            GRAFANA_PASSWORD=${GRAFANA_PASSWORD}
+            OPENBAO_ROOT_TOKEN=${OPENBAO_ROOT_TOKEN}
+            EOF
+
+            # Make init script executable
+            chmod +x init-db.sh
+
+            # Login to GHCR so docker can pull private images
+            echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
+
+            # Wipe current state (volumes kept for postgres data unless --volumes is added)
+            docker compose down --remove-orphans || true
+
+            # Pull latest images
+            docker compose pull
+
+            # Start everything
+            docker compose up -d
+
+            # Show running services
+            docker compose ps
