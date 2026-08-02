@@ -367,6 +367,162 @@ Test credentials: `test / test` on `ci-platform` realm.
 
 ---
 
+## Concurrency — ETag, RowVersion, Distributed Lock
+
+Three complementary layers — all must be present, each catches what the others miss.
+
+```
+Layer 1 — Redis distributed lock        pessimistic, workflow/job level
+  Prevents two workflow instances from starting on the same record at all.
+  Key convention: lock:{module}:{entity-type}:{id}
+
+Layer 2 — PostgreSQL xmin (RowVersion)  optimistic, DB level
+  BaseEntity.RowVersion maps to the PostgreSQL xmin system column.
+  Configured via UseXminAsConcurrencyToken() in every DbContext.
+  No extra column — Postgres increments xmin on every row update automatically.
+  DbUpdateConcurrencyException → Result.Failure(ErrorCodes.RECORD_LOCKED)
+
+Layer 3 — ETag                          HTTP level, caching + UI conflict detection
+  ETag = xmin formatted as 8-digit lowercase hex in quotes: "0000001a"
+  GET response  → ETag: "0000001a"
+  GET request   → If-None-Match: "0000001a" → 304 Not Modified (no body sent)
+  PUT request   → If-Match: "0000001a" → 412 Precondition Failed if stale
+```
+
+**CI.Kernel packages (v1.1.0):**
+- `CI.Kernel` — `IETaggable`, `ETagHelper`, `IDistributedLock`, `[NoEvent]`, `ErrorCodes.RECORD_LOCKED`
+- `CI.Kernel.Http` — `HttpContextETagExtensions`: `IsNotModified()`, `IfMatchPasses()`, `ParseIfMatch()`
+- `CI.Kernel.InMemory` — `NullDistributedLock` (tests + local dev)
+- `CI.Kernel.Redis` — `RedisDistributedLock` (SETNX + Lua atomic release), `RedisCacheService`, `AddRedisKernel()`
+
+**Usage pattern in every controller:**
+```csharp
+// GET
+if (HttpContext.IsNotModified(entity.RowVersion)) return StatusCode(304);
+return Ok(entity);
+
+// PUT
+if (!HttpContext.IfMatchPasses(entity.RowVersion)) return StatusCode(412);
+```
+
+**Usage in workflow steps:**
+```csharp
+await using var handle = await _lock.TryAcquireAsync(
+    $"lock:invoicing:invoice:{id}", TimeSpan.FromMinutes(5));
+if (handle is null) return Result.Failure(ErrorCodes.RECORD_LOCKED);
+```
+
+**Architecture tests (in CI.Kernel.ArchTests):**
+- `Command_handlers_must_inject_IEventBus_or_carry_NoEvent`
+- `Domain_entities_must_extend_BaseEntity`
+
+---
+
+## Party Module — CI.Module.Parties
+
+### Core model
+
+```
+Party (base — shared columns: Id, TenantId, RowVersion, Addresses, Contacts, Identifiers, BankAccounts)
+  ├─ Organization
+  │    LegalName, TradeName?, LegalFormId, CountryCode
+  └─ Individual
+       FirstName, LastName, DateOfBirth?, CountryCode
+
+PartyIdentifier[]    — NIP, PESEL, VAT-EU, KRS, REGON, passport… (TypeCode + Value)
+PartyAddress[]       — registered office, mailing, delivery… (TypeCode + full address)
+PartyContact[]       — email, phone, website, LinkedIn (Type + Value + IsPrimary)
+PartyBankAccount[]   — IBAN, BIC, BankName
+```
+
+### Roles vs Relationships — two separate tables
+
+**PartyRole** — what role this party plays in YOUR business context:
+
+| RoleType | Meaning |
+|---|---|
+| `Client` | They buy from you — you issue invoices TO them, you earn |
+| `Contractor` | They work for you — they invoice YOU, you pay them for services |
+| `Supplier` | They supply goods to you — they invoice YOU, you pay them for goods |
+| `OwnEntity` | One of YOUR own legal entities (invoice issuer, employer in HR) |
+| `Partner` | Business partner — bidirectional commercial relationship |
+
+A party can hold multiple roles simultaneously — a law firm can be your Client AND your Contractor. Two rows in PartyRole, same PartyId.
+
+**PartyRelationship** — structural links between parties (ownership, governance):
+
+| Type | Example |
+|---|---|
+| `IsShareholderOf` | Individual X owns 30% of Organization Y — has `SharePercent` |
+| `IsDirectorOf` | Individual X is board director of Organization Y |
+| `IsSubsidiaryOf` | Organization X is a subsidiary of Organization Y |
+| `IsMemberOf` | Individual X is a member of Organization Y |
+| `IsAgentOf` | Individual X acts as legal agent for Organization Y |
+
+### OwnEntity
+
+A tenant can have multiple own entities (e.g. holding company + operating subsidiary).
+`OwnEntity` role on a Party = that party is a legal issuer for invoices, employer in HR, etc.
+
+### Module isolation rule for Parties
+
+**Other modules never import CI.Module.Parties code or query its DB.**
+They store `PartyId: Guid` as a foreign reference only. When they need party data:
+
+| Need | Approach |
+|---|---|
+| Legal document (invoice PDF) | Snapshot party name/address at creation time — never changes retroactively |
+| UI display | HTTP GET `/parties/{id}` at render time |
+| Frequent reads | Subscribe to `PartyUpdatedEvent` → maintain local read projection |
+
+---
+
+## CI.Platform.Workflow — Pipeline Execution Model
+
+### Instance model
+
+```
+WorkflowDefinition
+  Graph of nodes + edges, trigger, compensation map, version
+
+WorkflowInstance
+  Status: Pending | Running | Paused | Completed | Failed | Cancelled
+  StartedAt, CompletedAt, TotalDurationMs
+  CurrentNodeId, TriggerPayload
+
+WorkflowStepExecution  (one row per node execution)
+  NodeId, NodeName
+  Status: Waiting | Running | Success | Warning | Failed | Compensated
+  StartedAt, CompletedAt, DurationMs
+  RetryCount, MaxRetries
+  InputPayload, OutputPayload   — for debugging/audit
+  ErrorMessage?
+
+CompensationLog  — rollback audit trail
+  StepId, CompensationAction, ExecutedAt, Result
+```
+
+### Retry, cancellation, rollback
+
+- **Retries** — configurable per node (count + backoff strategy). RetryCount tracked per step.
+- **Cancellation** — `CancelInstance` command transitions instance to `Cancelled`. Running steps finish their current unit of work then stop cleanly.
+- **Rollback (saga compensation)** — each step that mutates state registers a compensation action. On failure the engine runs compensations in reverse order. `CompensationLog` records what was undone.
+
+### Real-time UI updates — SignalR
+
+Workflow engine writes step status → publishes `WorkflowStepStatusChanged` event → SignalR hub pushes to connected clients.
+
+Users see the same pipeline visualization as GitHub Actions / Azure DevOps:
+- Green tick (Success), Red X (Failed), Yellow triangle (Warning), Spinner (Running)
+- Duration per step, total duration
+- Retry count badge
+- Expandable input/output payload per step
+- Cancel button while running
+
+SignalR hub lives in `CI.Platform.Workflow`. The same hub connection is reused for all live-push features (notifications, booking updates, etc.).
+
+---
+
 ## Key Decisions Log
 
 | Date | Decision | Reason |
@@ -385,3 +541,10 @@ Test credentials: `test / test` on `ci-platform` realm.
 | 2026-08-02 | KC_HOSTNAME=http://keycloak:8080 | Public IP unreachable from inside Docker; internal hostname ensures jwks_uri is reachable |
 | 2026-08-02 | Keycloak realm ssl_required patched via keycloak-setup.sh on every deploy | Keycloak 25 defaults EXTERNAL; KC_HOSTNAME_STRICT_HTTPS removed in hostname:v2 |
 | 2026-08-02 | Internal service-to-service calls bypass the gateway | Gateway is for external traffic; internal calls are trusted on the Docker network |
+| 2026-08-02 | RowVersion = PostgreSQL xmin (uint), not byte[] SQL Server rowversion | No extra column, Postgres manages it automatically, maps via UseXminAsConcurrencyToken() |
+| 2026-08-02 | ETag = xmin as 8-digit hex in quotes — three-layer concurrency (Redis lock + xmin + ETag) | Each layer catches what the others miss: Redis=parallel jobs, xmin=DB race, ETag=browser tabs |
+| 2026-08-02 | Party splits into Organization and Individual tables | Organization and Individual are correct domain terms; Tenant is the platform-layer concept — no conflict |
+| 2026-08-02 | PartyRole (Client/Contractor/Supplier/OwnEntity/Partner) and PartyRelationship (shareholder/director/subsidiary) are separate tables | Roles = business context; Relationships = structural ownership/governance — different concerns |
+| 2026-08-02 | Contractor ≠ Client — Client pays YOU, Contractor is paid BY YOU | Same party can hold both roles simultaneously — two rows in PartyRole |
+| 2026-08-02 | Other modules store PartyId: Guid only — never import Parties code or DB | Module isolation; legal documents snapshot party data at creation; display reads via HTTP |
+| 2026-08-02 | Workflow steps tracked individually — status, duration, retries, input/output, compensation | Pipeline visualization like GitHub Actions; SignalR pushes step status changes in real time |
