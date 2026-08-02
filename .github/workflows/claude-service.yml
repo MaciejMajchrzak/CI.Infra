@@ -35,7 +35,7 @@ jobs:
 
       - name: Restore
         env:
-          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUGET_AUTH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
         run: dotnet restore
 
       - name: Build
@@ -89,7 +89,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             API_PROJECT=${{ inputs.api-project }}
-            NUGET_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
+            NUGET_AUTH_TOKEN=${{ secrets.PACKAGES_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
