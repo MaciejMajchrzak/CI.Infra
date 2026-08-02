@@ -70,5 +70,16 @@ jobs:
             # Start everything
             docker compose up -d
 
+            # Wait for Keycloak to be ready (up to 90s), then patch master realm
+            # ssl_required defaults to EXTERNAL — must be NONE for HTTP dev access
+            echo "Waiting for Keycloak..."
+            for i in $(seq 1 18); do
+              if docker exec ci-postgres psql -U ci -d ci_keycloak -c "SELECT 1 FROM realm WHERE id='master'" 2>/dev/null | grep -q "1 row"; then
+                docker exec ci-postgres psql -U ci -d ci_keycloak -c "UPDATE realm SET ssl_required='NONE' WHERE id='master';" && echo "Realm patched." && break
+              fi
+              echo "  attempt $i/18 — waiting 5s..."
+              sleep 5
+            done
+
             # Show running services
             docker compose ps
