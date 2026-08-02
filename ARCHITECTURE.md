@@ -82,7 +82,7 @@ CI.Platform.<Name>/
 | DB | PostgreSQL + PostGIS | Free, geo support, JSON columns |
 | ORM | EF Core + Npgsql | |
 | Messaging | MassTransit → RabbitMQ (start) | Kafka later if needed (see Transport section) |
-| Auth | Keycloak | Two roles: `system-admin`, `org-user` |
+| Auth | Keycloak | Two roles: `system-admin`, `tenant-user` |
 | Cache | IMemoryCache (L1) + Valkey/Redis (L2) | L1 invalidated via Redis pub/sub across pods |
 | Object storage | SeaweedFS (dev) / MinIO-compatible | S3-compatible |
 | Secrets | OpenBao (Vault-compatible) | All connection strings pulled at boot |

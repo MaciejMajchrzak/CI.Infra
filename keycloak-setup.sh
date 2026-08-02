@@ -99,6 +99,26 @@ else
   echo "    WARNING: mapper returned HTTP $STATUS — skipping."
 fi
 
+echo "==> Creating realm role 'tenant-user'..."
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$KC_URL/admin/realms/$REALM/roles" \
+  -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"name":"tenant-user","description":"Regular tenant member"}')
+if [ "$STATUS" = "201" ]; then
+  echo "    Role 'tenant-user' created."
+elif [ "$STATUS" = "409" ]; then
+  echo "    Role 'tenant-user' already exists."
+else
+  echo "    WARNING: role creation returned HTTP $STATUS"
+fi
+
+echo "==> Removing legacy role 'org-user' if present..."
+ORG_USER_EXISTS=$(curl -s -o /dev/null -w "%{http_code}" "$KC_URL/admin/realms/$REALM/roles/org-user" -H "$AUTH")
+if [ "$ORG_USER_EXISTS" = "200" ]; then
+  curl -sf -X DELETE "$KC_URL/admin/realms/$REALM/roles/org-user" -H "$AUTH" && echo "    Role 'org-user' removed."
+else
+  echo "    Role 'org-user' not present — nothing to remove."
+fi
+
 echo "==> Creating test user '$TEST_USER'..."
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$KC_URL/admin/realms/$REALM/users" \
   -H "$AUTH" -H "Content-Type: application/json" \
