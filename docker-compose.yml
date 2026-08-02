@@ -57,6 +57,9 @@ services:
       KC_DB_URL: jdbc:postgresql://postgres:5432/ci_keycloak
       KC_DB_USERNAME: ci
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
     command: start-dev
     ports:
       - "8080:8080"
