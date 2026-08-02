@@ -59,8 +59,7 @@ services:
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
       KC_HTTP_ENABLED: "true"
       KC_HOSTNAME_STRICT: "false"
-      KC_HOSTNAME: "104.248.18.53"
-      KC_HOSTNAME_PORT: "8080"
+      KC_HOSTNAME: "http://keycloak:8080"
     command: start-dev
     ports:
       - "8080:8080"
