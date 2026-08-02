@@ -2,7 +2,6 @@ name: CI Service Pipeline
 
 on:
   workflow_call:
-  workflow_dispatch:
     inputs:
       project-name:
         description: 'Image name in GHCR and service name in docker compose on droplet'
