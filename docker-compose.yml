@@ -5,6 +5,7 @@ services:
   postgres:
     image: postgis/postgis:16-3.4
     container_name: ci-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ci
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -15,7 +16,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ci"]
+      test: ["CMD-SHELL", "pg_isready -U ci -d ci_platform"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -164,7 +165,7 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 60s
 
   ci-platform-users:
     image: ghcr.io/maciejmajchrzak/ci-platform-users:latest
@@ -190,7 +191,7 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 60s
 
   ci-platform-gateway:
     image: ghcr.io/maciejmajchrzak/ci-platform-gateway:latest
