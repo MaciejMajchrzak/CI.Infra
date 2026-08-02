@@ -24,7 +24,7 @@ jobs:
           host: ${{ secrets.DROPLET_HOST }}
           username: ${{ secrets.DROPLET_USER }}
           key: ${{ secrets.DROPLET_SSH_KEY }}
-          source: "docker-compose.yml,init-db.sh,monitoring/"
+          source: "docker-compose.yml,init-db.sh,keycloak-setup.sh,monitoring/"
           target: /opt/ci-platform
 
       - name: Deploy
@@ -70,16 +70,12 @@ jobs:
             # Start everything
             docker compose up -d
 
-            # Wait for Keycloak to be ready (up to 90s), then patch master realm
-            # ssl_required defaults to EXTERNAL — must be NONE for HTTP dev access
-            echo "Waiting for Keycloak..."
-            for i in $(seq 1 18); do
-              if docker exec ci-postgres psql -U ci -d ci_keycloak -c "SELECT 1 FROM realm WHERE name='master'" 2>/dev/null | grep -q "1 row"; then
-                docker exec ci-postgres psql -U ci -d ci_keycloak -c "UPDATE realm SET ssl_required='NONE';" && echo "Realm patched." && break
-              fi
-              echo "  attempt $i/18 — waiting 5s..."
-              sleep 5
-            done
+            # Run Keycloak setup (creates realm, client, mapper, test user)
+            chmod +x keycloak-setup.sh
+            KC_URL=http://localhost:8080 \
+            KC_ADMIN=admin \
+            KC_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD} \
+            bash keycloak-setup.sh
 
             # Show running services
             docker compose ps
