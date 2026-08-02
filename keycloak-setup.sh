@@ -78,24 +78,25 @@ echo "==> Adding audience mapper to client..."
 CLIENT_UUID=$(curl -sf "$KC_URL/admin/realms/$REALM/clients?clientId=$CLIENT_ID" \
   -H "$AUTH" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 
-DEDICATED_SCOPE=$(curl -sf "$KC_URL/admin/realms/$REALM/clients/$CLIENT_UUID/default-client-scopes" \
-  -H "$AUTH" | grep -o '"id":"[^"]*","name":"[^"]*-dedicated"' | head -1 | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
-
-if [ -n "$DEDICATED_SCOPE" ]; then
-  curl -sf -X POST "$KC_URL/admin/realms/$REALM/client-scopes/$DEDICATED_SCOPE/protocol-mappers/models" \
-    -H "$AUTH" -H "Content-Type: application/json" \
-    -d '{
-      "name": "account-audience",
-      "protocol": "openid-connect",
-      "protocolMapper": "oidc-audience-mapper",
-      "config": {
-        "included.client.audience": "account",
-        "access.token.claim": "true",
-        "id.token.claim": "false"
-      }
-    }' && echo "    Audience mapper added." || echo "    Mapper may already exist — skipping."
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+  "$KC_URL/admin/realms/$REALM/clients/$CLIENT_UUID/protocol-mappers/models" \
+  -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{
+    "name": "account-audience",
+    "protocol": "openid-connect",
+    "protocolMapper": "oidc-audience-mapper",
+    "config": {
+      "included.client.audience": "account",
+      "access.token.claim": "true",
+      "id.token.claim": "false"
+    }
+  }')
+if [ "$STATUS" = "201" ]; then
+  echo "    Audience mapper added."
+elif [ "$STATUS" = "409" ]; then
+  echo "    Audience mapper already exists."
 else
-  echo "    WARNING: could not find dedicated scope, skipping mapper."
+  echo "    WARNING: mapper returned HTTP $STATUS — skipping."
 fi
 
 echo "==> Creating test user '$TEST_USER'..."
