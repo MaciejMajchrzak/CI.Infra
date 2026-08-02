@@ -1,0 +1,116 @@
+name: CI Service Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      project-name:
+        description: 'Image name in GHCR and service name in docker compose on droplet'
+        required: true
+        type: string
+      api-project:
+        description: 'Path to the .csproj to publish, e.g. src/CI.Module.Invoicing.API/CI.Module.Invoicing.API.csproj'
+        required: true
+        type: string
+      dotnet-version:
+        required: false
+        type: string
+        default: '10.0.x'
+      run-deploy:
+        description: 'Set to true to deploy to droplet after push to main'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - name: Add GitHub NuGet source
+        run: |
+          dotnet nuget add source \
+            --username ${{ github.actor }} \
+            --password ${{ secrets.GITHUB_TOKEN }} \
+            --store-password-in-clear-text \
+            --name github \
+            "https://nuget.pkg.github.com/MaciejMajchrzak/index.json"
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore -c Release
+
+      - name: Test
+        run: dotnet test --no-build -c Release --logger trx --results-directory ./test-results
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.run_id }}
+          path: ./test-results
+
+  docker:
+    name: Build & Push Image
+    needs: build-test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      sha: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/maciejmajchrzak/${{ inputs.project-name }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            API_PROJECT=${{ inputs.api-project }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Droplet
+    needs: docker
+    if: github.ref == 'refs/heads/main' && inputs.run-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          script: |
+            docker pull ghcr.io/maciejmajchrzak/${{ inputs.project-name }}:latest
+            docker compose -f /opt/ci-platform/docker-compose.yml up -d ${{ inputs.project-name }}
+            docker image prune -f

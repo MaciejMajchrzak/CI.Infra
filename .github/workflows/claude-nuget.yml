@@ -1,0 +1,52 @@
+name: CI NuGet Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      package-project:
+        description: 'Path to the .csproj to pack, e.g. src/CI.Kernel/CI.Kernel.csproj'
+        required: true
+        type: string
+      dotnet-version:
+        required: false
+        type: string
+        default: '10.0.x'
+
+jobs:
+  build-test-publish:
+    name: Build, Test & Publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore -c Release
+
+      - name: Test
+        run: dotnet test --no-build -c Release
+
+      - name: Pack
+        if: github.ref == 'refs/heads/main'
+        run: |
+          dotnet pack ${{ inputs.package-project }} \
+            --no-build -c Release \
+            -o ./nupkgs
+
+      - name: Publish to GitHub Packages
+        if: github.ref == 'refs/heads/main'
+        run: |
+          dotnet nuget push ./nupkgs/*.nupkg \
+            --api-key ${{ secrets.GITHUB_TOKEN }} \
+            --source "https://nuget.pkg.github.com/MaciejMajchrzak/index.json" \
+            --skip-duplicate

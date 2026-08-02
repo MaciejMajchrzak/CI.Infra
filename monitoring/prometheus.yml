@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # each service registers itself here when it's up
+  # add entries as services are deployed
+  # - job_name: ci-module-invoicing
+  #   static_configs:
+  #     - targets: ['host.docker.internal:5001']
+  #   metrics_path: /metrics
