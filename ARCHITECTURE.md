@@ -1,6 +1,6 @@
 # CodingInnovators Platform — Architecture
 
-> Last updated: 2026-08-03 (session 3)
+> Last updated: 2026-08-03 (session 4)
 
 ---
 
@@ -583,12 +583,25 @@ PaymentTransaction
   FailureReason?
   RowVersion
 
+  -- DB CHECK constraint (enforced at migration level):
+  -- CHECK (num_nonnulls(LinkedAppointmentId, LinkedStayId, LinkedInvoiceId) <= 1)
+  -- A payment is for exactly one primary subject. Invoice links back via Invoice.LinkedPaymentId.
+
 Refund[]                     — aggregate child
   PaymentTransactionId
   Amount, Reason
   Status: Pending | Approved | Rejected
   ProviderRefundRef?         — provider's own refund ID
+
+MerchantAccount              — per-branch provider account (Marketplace mode)
+  Id, TenantId, BranchId
+  ProviderName               — matches PaymentTransaction.ProviderName
+  ProviderAccountRef         — e.g. Stripe Connect account ID, Mollie org ID
+  IsActive, ChargesEnabled, PayoutsEnabled
+  RowVersion
 ```
+
+**FinancialDaySummary and multi-currency:** one row per `(TenantId, Date, Currency)` — never sum across currencies. Tenants operating in EUR and PLN get two rows per day, one per currency.
 
 ---
 
@@ -973,8 +986,8 @@ JournalLine[]                 — two or more; sum(Debit) must equal sum(Credit)
 //   and formats them per the legal KPiR template. Same pattern as JPK_V7.
 
 // Live analytics — no separate reporting module
-FinancialDaySummary           — one row per (TenantId, Date); updated on every write event
-  TenantId, Date
+FinancialDaySummary           — one row per (TenantId, Date, Currency); never sum across currencies
+  TenantId, Date, Currency
   Revenue, Costs, VatCollected, VatPaid, NetIncome
   UpdatedAt
 // Hours/days/weeks/months/years = range query on Date, no runtime aggregation.
@@ -1036,6 +1049,58 @@ Current state: `Project`, `WorkTask`, `TimeLog`, `TaskLabel`. Partial implementa
 
 ---
 
+## Transactional Outbox — Reliable Event Publishing
+
+**Problem:** handler writes to DB, then publishes event to RabbitMQ. If the publish fails after the DB commit, the event is silently lost — `BookingCreatedEvent` vanishes, `PublishedAvailability` never decrements, `FinancialDaySummary` is stale.
+
+**Rule: no handler ever calls `IEventBus.PublishAsync` directly.** Instead it writes to `OutboxMessage` in the same DB transaction. A background publisher reads and delivers.
+
+```
+OutboxMessage                 — one table per module DB
+  Id (Guid), TenantId
+  EventType (string)          — fully-qualified event type name
+  Payload (text)              — serialized event, replayed as-is — outbound only, never queried inside
+  CreatedAt, ProcessedAt?
+  Status: Pending | Delivered | Failed
+  RetryCount, LastError?
+```
+
+```
+OutboxPublisher (BackgroundService per module)
+  1. SELECT TOP 50 WHERE Status = Pending ORDER BY CreatedAt  (with row-level lock)
+  2. Publish each to RabbitMQ
+  3. UPDATE Status = Delivered, ProcessedAt = now
+  4. On failure: UPDATE RetryCount++, Status = Failed after MaxRetries
+```
+
+**Idempotency on consumers:** RabbitMQ is at-least-once. Every `IEventConsumer<T>` that writes to a projection or fires a side effect must track processed message IDs:
+
+```
+ProcessedEvent                — one table per module DB
+  MessageId (Guid, unique index)
+  ProcessedAt
+```
+
+Consumer checks `ProcessedEvent` before acting. If already processed → ack and skip. This prevents double-decrement on `PublishedAvailability`, double-row on `FinancialDaySummary`, etc.
+
+---
+
+## WorkflowDefinition Versioning
+
+```
+WorkflowDefinition
+  Id, TenantId, Name
+  Version (int)               — incremented on every publish
+  IsActive (bool)             — only one active version per name per tenant
+
+WorkflowInstance
+  DefinitionId, DefinitionVersion   — pins to the version it started on
+```
+
+A definition change publishes a new version. Running instances continue on their pinned version. Arch test: `WorkflowInstance.DefinitionVersion` must equal the `WorkflowDefinition.Version` it was started from — enforced at creation, never updated after.
+
+---
+
 ## Architecture Rules (enforced by CI.Kernel.ArchTests)
 
 | Rule | Catches |
@@ -1043,8 +1108,10 @@ Current state: `Project`, `WorkTask`, `TimeLog`, `TaskLabel`. Partial implementa
 | Domain → no Core/Infra/API | Service logic in Domain |
 | Core → no Infra/API | DB queries from service layer |
 | Controllers → no DbContext | Bypassing service layer |
+| **Controllers inject only ICommandBus + IQueryBus — no individual handler classes** | N-handler constructor bloat; handlers must be resolved by the bus, not injected directly |
 | Events end with `Event` | Missing suffix |
 | Commands end with `Command` | Inconsistent naming |
+| Queries end with `Query` | Inconsistent naming |
 | Handlers are sealed | Inheritance on handlers |
 | Services are sealed | Inheritance on services |
 | Domain → no other modules | Direct module coupling |
@@ -1055,6 +1122,13 @@ Current state: `Project`, `WorkTask`, `TimeLog`, `TaskLabel`. Partial implementa
 | Cross-boundary events live in CI.Kernel | Event only in module domain |
 | No JSON columns on domain entities | Country/config data serialized into DB |
 | No country-specific typed properties on entities | PL/DE/FR hardcoding in domain |
+| **No provider-specific field names on PaymentTransaction** | Scan for properties prefixed Stripe/Mollie/Adyen/Paypal — breaks provider abstraction |
+| **WorkflowDefinition must have Version (int) property** | Running instances corrupt if definition changes under them |
+| **IEventConsumer implementations must reference ProcessedEventId or OutboxMessageId** | At-least-once delivery without idempotency = duplicate side effects |
+| **FinancialDaySummary written only from IEventConsumer, never from ICommandHandler** | Projection updated synchronously on write defeats the event-driven model |
+| **If XCreatedConsumer exists in PublicDiscovery, XCancelledConsumer must also exist** | Availability decrements on booking but never recovers on cancellation |
+| **Entities with IsActive/IsArchived must filter it in every repository query** | Soft-deleted records leaking into results |
+| **Cross-module references in billing/legal documents must snapshot name+price at creation** | Legal immutability — price/name changes must not alter past documents |
 
 ---
 
@@ -1188,3 +1262,12 @@ Test credentials: `test / test` on `ci-platform` realm.
 | 2026-08-03 | PaymentTransaction uses ProviderName + ProviderTransactionRef (no Stripe fields) | IPaymentProvider plugin pattern — swap Stripe for Mollie/Przelewy24/Adyen with one DI change |
 | 2026-08-03 | WorkflowNode adds ParallelFork, ParallelJoin (All/Any/N-of-M), IsFireAndForget | Email failure must not cancel a booking — fire-and-forget = Warning, not Failure |
 | 2026-08-03 | PublicDiscovery availability is event-driven; AvailabilityWorker is reconciliation only | Every booking change must reflect immediately in public availability — scheduled worker only catches drift |
+| 2026-08-03 | Controllers inject only ICommandBus + IQueryBus — never individual handler classes | Adding an endpoint must not require changing the constructor; bus resolves handler from DI |
+| 2026-08-03 | Transactional Outbox pattern — no direct IEventBus.PublishAsync from handlers | Events survive DB commit even if RabbitMQ is temporarily unavailable |
+| 2026-08-03 | ProcessedEvent table per module for consumer idempotency | At-least-once RabbitMQ delivery means duplicates will happen; idempotency prevents double side effects |
+| 2026-08-03 | PaymentTransaction.Linked* fields: CHECK num_nonnulls <= 1 | A payment is for one subject; Invoice links back via Invoice.LinkedPaymentId |
+| 2026-08-03 | MerchantAccount entity replaces provider-specific connect account entities | Generic per-branch provider account reference — swap providers without schema change |
+| 2026-08-03 | FinancialDaySummary is per (TenantId, Date, Currency) — never sum across currencies | Tenants invoicing in EUR and PLN get two rows per day |
+| 2026-08-03 | WorkflowDefinition has Version; WorkflowInstance pins to DefinitionVersion | Running instances must not be affected by definition changes published after they started |
+| 2026-08-03 | Entities with IsActive/IsArchived must filter in every repository query | Soft-deleted records must never appear in normal query results |
+| 2026-08-03 | Cross-module references in billing/legal documents must snapshot at creation | Price and name changes must not alter past legal documents |
