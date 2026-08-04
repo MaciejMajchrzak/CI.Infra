@@ -66,8 +66,8 @@ jobs:
             # Login to GHCR so docker can pull private images
             echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
 
-            # Wipe current state including postgres volume so init-db.sh always runs clean
-            docker compose down --volumes --remove-orphans || true
+            # Stop containers but KEEP volumes (BaGet packages, postgres data must persist)
+            docker compose down --remove-orphans || true
 
             # Pull latest images — services with no image yet are skipped gracefully
             docker compose pull --ignore-pull-failures
@@ -75,8 +75,8 @@ jobs:
             # Start infrastructure + services whose images exist; skip those still missing
             docker compose up -d --remove-orphans || true
 
-            # Ensure infra is up even if app services failed
-            docker compose up -d postgres valkey rabbitmq keycloak seaweedfs-master seaweedfs-volume seaweedfs-filer openbao jaeger prometheus grafana
+            # Ensure infra is always up even if app services failed
+            docker compose up -d postgres valkey rabbitmq keycloak seaweedfs-master seaweedfs-volume seaweedfs-filer openbao jaeger prometheus grafana baget
 
             # Run Keycloak setup (creates realm, client, mapper, test user)
             chmod +x keycloak-setup.sh
