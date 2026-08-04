@@ -37,11 +37,12 @@ jobs:
           OPENBAO_ROOT_TOKEN:      ${{ secrets.OPENBAO_ROOT_TOKEN }}
           GHCR_TOKEN:              ${{ secrets.PACKAGES_TOKEN }}
           GHCR_USER:               MaciejMajchrzak
+          BAGET_API_KEY:           ${{ secrets.BAGET_API_KEY }}
         with:
           host: ${{ secrets.DROPLET_HOST }}
           username: ${{ secrets.DROPLET_USER }}
           key: ${{ secrets.DROPLET_SSH_KEY }}
-          envs: POSTGRES_PASSWORD,RABBITMQ_PASSWORD,KEYCLOAK_ADMIN_PASSWORD,GRAFANA_PASSWORD,OPENBAO_ROOT_TOKEN,GHCR_TOKEN,GHCR_USER
+          envs: POSTGRES_PASSWORD,RABBITMQ_PASSWORD,KEYCLOAK_ADMIN_PASSWORD,GRAFANA_PASSWORD,OPENBAO_ROOT_TOKEN,GHCR_TOKEN,GHCR_USER,BAGET_API_KEY
           script: |
             set -e
             cd /opt/ci-platform
@@ -53,6 +54,7 @@ jobs:
             KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD}
             GRAFANA_PASSWORD=${GRAFANA_PASSWORD}
             OPENBAO_ROOT_TOKEN=${OPENBAO_ROOT_TOKEN}
+            BAGET_API_KEY=${BAGET_API_KEY}
             EOF
 
             # Make init script executable

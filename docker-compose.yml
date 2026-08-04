@@ -142,6 +142,29 @@ services:
       - prometheus
       - jaeger
 
+  baget:
+    image: bagetter/bagetter:latest
+    container_name: ci-baget
+    restart: unless-stopped
+    environment:
+      ApiKey: ${BAGET_API_KEY}
+      Storage__Type: FileSystem
+      Storage__Path: /var/baget/packages
+      Database__Type: Sqlite
+      Database__ConnectionString: Data Source=/var/baget/baget.db
+      Search__Type: Database
+      AllowPackageOverwrites: "true"
+    volumes:
+      - baget_data:/var/baget
+    ports:
+      - "5555:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/v3/index.json || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   # ── Platform Core Services ──────────────────────────────────────────────────
 
   ci-platform-tenants:
@@ -892,3 +915,4 @@ volumes:
   seaweedfs_master:
   seaweedfs_volume:
   grafana_data:
+  baget_data:

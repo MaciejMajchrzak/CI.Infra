@@ -18,7 +18,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -28,8 +27,6 @@ jobs:
           dotnet-version: ${{ inputs.dotnet-version }}
 
       - name: Restore
-        env:
-          NUGET_AUTH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
         run: dotnet restore
 
       - name: Build
@@ -45,10 +42,10 @@ jobs:
             --no-build -c Release \
             -o ./nupkgs
 
-      - name: Publish to GitHub Packages
+      - name: Publish to BaGet
         if: github.ref == 'refs/heads/main'
         run: |
           dotnet nuget push ./nupkgs/*.nupkg \
-            --api-key ${{ secrets.GITHUB_TOKEN }} \
-            --source "https://nuget.pkg.github.com/MaciejMajchrzak/index.json" \
+            --api-key ${{ secrets.BAGET_API_KEY }} \
+            --source "http://${{ secrets.DROPLET_HOST }}:5555/v3/index.json" \
             --skip-duplicate
