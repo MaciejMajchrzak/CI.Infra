@@ -1,6 +1,6 @@
 # CodingInnovators Platform — Architecture
 
-> Last updated: 2026-08-03 (session 4)
+> Last updated: 2026-08-04 (session 5)
 
 ---
 
@@ -1132,6 +1132,258 @@ A definition change publishes a new version. Running instances continue on their
 
 ---
 
+## CI.Platform.Billing — Full Architecture
+
+### Plan tiers
+
+Plans are configurable DB entities — not enums, not constants. They have a stable `Code` slug (`free` / `pro` / `business` / `enterprise`) and can have time-limited overrides (promotional plans) via `ValidFrom` / `ValidTo`.
+
+One global plan tier per tenant. Module-level subscriptions (e.g. "buy Accounting separately") are NOT in scope — plan controls what modules are allowed and what limits apply across the board.
+
+```
+Plan
+  Id, Code (unique slug), Name, Description?
+  IsSystem (bool)      — true = protected from delete; seeded plans are system plans
+  IsPublic (bool)      — false = admin-only / enterprise negotiated plan
+  IsActive (bool)
+  SortOrder (int)
+  ValidFrom?, ValidTo? — time-limited promotional plans
+  StripeProductId?     — links to Stripe product for self-serve checkout
+  RowVersion
+
+PlanPrice             — one row per (Plan, Currency, Period) combination
+  Id, PlanId (FK)
+  CurrencyCode         — "EUR", "PLN", "USD", …
+  Amount (decimal)
+  Period: Monthly | Annually
+  IsActive (bool)
+  StripePriceId?
+  → unique index on (PlanId, CurrencyCode, Period)
+
+PlanAllowedModule     — join table: which modules a plan grants access to
+  Id, PlanId (FK), ModuleCode (string slug)
+  → unique index on (PlanId, ModuleCode)
+
+ModuleFeatureLimit    — per-plan, per-module limit rows
+  Id, PlanId (FK), ModuleCode, LimitKey, LimitValue (long? — null = unlimited)
+  → unique index on (PlanId, ModuleCode, LimitKey)
+```
+
+### Seeded plan limits
+
+| Plan | LimitKey | Value |
+|---|---|---|
+| free | platform.max_users | 3 |
+| free | platform.max_storage_gb | 5 |
+| free | booking.max_branches | 1 |
+| free | booking.max_resources | 3 |
+| free | booking.max_activities | 5 |
+| free | booking.transaction_fee_bps | 500 (= 5.00%) |
+| free | invoicing.max_invoices_per_month | 0 |
+| pro | platform.max_users | 15 |
+| pro | platform.max_storage_gb | 50 |
+| pro | booking.max_branches | 3 |
+| pro | booking.max_resources | 20 |
+| pro | booking.transaction_fee_bps | 200 (= 2.00%) |
+| pro | invoicing.max_invoices_per_month | 50 |
+| business | platform.max_users | 50 |
+| business | platform.max_storage_gb | 500 |
+| business | booking.transaction_fee_bps | 100 (= 1.00%) |
+| business | invoicing.max_invoices_per_month | 500 |
+| business | hr.max_employees | 50 |
+| business | warehouse.max_locations | 10 |
+| enterprise | everything | null (unlimited) |
+| enterprise | booking.transaction_fee_bps | 0 (negotiated per deal) |
+
+Limits stored as basis points (`long`): 500 = 5.00%, 200 = 2.00%. Null = unlimited for any limit.
+
+### Enterprise deals
+
+A tenant can request an enterprise deal themselves (self-serve), or a system admin creates one manually after negotiating terms.
+
+```
+EnterpriseDeal
+  Id, TenantId
+  PlanId (FK — usually the "enterprise" plan)
+  Status: Pending | Active | Expired | Cancelled
+  NegotiatedPrice (decimal, can be 0)
+  CurrencyCode, Period: Monthly | Annually
+  ContractStart?, ContractEnd?
+  Notes?, AssignedByAdminId?
+  — infra overrides —
+  DbTierOverride?      — "shared" | "own" | "own-server"
+  StorageTierOverride? — "shared" | "own" | "own-server"
+  RegionOverride?      — e.g. "eu-central-1" | "us-east-1"
+  — limit overrides —
+  MaxUsers?, MaxModules?, MaxStorageGb?
+  AllowedModulesOverride? (CSV) — if set, replaces the plan's PlanAllowedModule list entirely
+  RowVersion
+
+EnterpriseDealModuleLimit    — per-deal module limit overrides (same keys as ModuleFeatureLimit)
+  Id, EnterpriseDealId (FK), ModuleCode, LimitKey, LimitValue?
+```
+
+Enterprise deal lifecycle:
+1. `RequestEnterpriseDealCommand` → creates `Status = Pending` (self-serve or admin-initiated)
+2. `ConfigureEnterpriseDealCommand` → admin sets price, limits, infra overrides, module limit rows
+3. `ActivateEnterpriseDealCommand` → sets `Status = Active`, wires deal to tenant's Subscription (sets `Subscription.EnterpriseDealId`), publishes `EnterpriseDealActivatedEvent`
+4. `CancelEnterpriseDealCommand` → `Status = Cancelled`
+
+### Subscription
+
+```
+Subscription
+  Id, TenantId
+  PlanId (FK)
+  PlanPriceId? (FK → PlanPrice)   — null for enterprise / manual billing
+  EnterpriseDealId? (FK)          — set when an active deal governs this subscription
+  Status: Trialing | Active | PastDue | Cancelled
+  StripeSubscriptionId?
+  TrialEndsAt?, CurrentPeriodEnd?
+  RowVersion
+```
+
+### Effective limits — merged view
+
+`GetEffectiveLimitsQuery(TenantId)` returns `EffectivePlanLimitsDto`:
+- Looks up tenant's active Subscription → Plan → PlanAllowedModules + ModuleFeatureLimits
+- If `Subscription.EnterpriseDealId` is set, applies deal overrides on top:
+  - `AllowedModulesOverride` CSV replaces plan module list entirely (if set)
+  - `MaxUsers` / `MaxStorageGb` from deal override plan "platform" limits (if set)
+  - `EnterpriseDealModuleLimit` rows override per-module limit values
+- Falls back to the `free` plan when no subscription exists (fail-safe)
+
+```
+EffectivePlanLimitsDto
+  TenantId, PlanCode, IsEnterprise
+  AllowedModules: List<string>
+  MaxUsers?: long, MaxStorageGb?: long
+  ModuleLimits: Dictionary<string, Dictionary<string, long?>>
+    e.g. { "booking": { "max_branches": 3, "transaction_fee_bps": 200 } }
+```
+
+Exposed as `GET /api/billing/tenants/{tenantId}/effective-limits` — consumed by other services via `IBillingClient`.
+
+### Cross-service plan check — IBillingClient
+
+`CI.Platform.Tenants` calls `CI.Platform.Billing` when a tenant tries to enable a module:
+
+```csharp
+// CI.Platform.Tenants.Core
+public interface IBillingClient
+{
+    Task<EffectiveLimits?> GetEffectiveLimitsAsync(Guid tenantId, CancellationToken ct);
+}
+
+// EffectiveLimits — lightweight record (not the full DTO)
+record EffectiveLimits(string PlanCode, List<string> AllowedModules, long? MaxUsers, long? MaxStorageGb);
+```
+
+`EnableModuleHandler` checks `AllowedModules.Contains(moduleId)` — returns `FORBIDDEN` if not on the plan.
+`ModulesController` maps `FORBIDDEN` → HTTP 403 with message "Module not available on your current plan."
+
+Fail-open: `HttpBillingClient` returns `null` on any exception → all modules allowed (prevents billing outage from locking out tenants). `NullBillingClient` used in local dev / tests when `Services:Billing` is not configured.
+
+---
+
+## Infrastructure Tiering — DB and Object Storage
+
+Every tenant starts on **shared** infrastructure. Tier upgrades are gated by `EnterpriseDeal.DbTierOverride` / `StorageTierOverride` (set by admin after negotiating the deal).
+
+### Database tiers
+
+| Tier | Where | Connection string source |
+|---|---|---|
+| `shared` | Same PostgreSQL instance as all shared tenants | OpenBao: `db/shared/tenants/{tenantId}/{module}` |
+| `own` | Own PostgreSQL database on the shared server | OpenBao: `db/own/{tenantId}/{module}` |
+| `own-server` | Dedicated PostgreSQL server (separate droplet or managed DB) | OpenBao: `db/server/{tenantId}/{module}` |
+
+**Rule:** Every service fetches its connection string from OpenBao at boot and on reconnect. The string itself encodes which tier is active — no tier-routing code in the application. Changing `DbTierOverride` means migrating data, updating the OpenBao path, and restarting the service.
+
+Core platform DBs (`ci_platform`, `ci_keycloak`, `ci_tenants`, `ci_billing`) are on the shared PostgreSQL instance and are **never metered per-tenant** — they are platform infrastructure.
+
+### Object storage tiers
+
+| Tier | Where | Access pattern |
+|---|---|---|
+| `shared` | Shared SeaweedFS cluster, namespace prefix `tenants/{tenantId}/` | Platform-managed |
+| `own` | Dedicated SeaweedFS bucket (same cluster, isolated namespace) | Platform-managed |
+| `own-server` | Dedicated SeaweedFS cluster or external S3-compatible endpoint | Tenant-managed credential in OpenBao |
+
+`IFileStorage` abstraction resolves the correct endpoint + prefix per tenant at runtime from OpenBao. No storage-tier-specific code in business modules.
+
+---
+
+## Resource Metering
+
+`CI.Platform.Billing` is responsible for metering — not individual modules.
+
+### TenantResourceSnapshot
+
+Metering data is collected periodically and stored per tenant:
+
+```
+TenantResourceSnapshot      — append-only, one row per collection run per tenant
+  Id, TenantId
+  SnapshotAt (timestamp)
+  StorageUsedBytes (long)   — from SeaweedFS tenant-prefix API or pg_database_size()
+  DbSizeBytes? (long)       — for own/own-server tiers: actual DB size; null on shared (platform cost, not tenant)
+  ActiveUsers (int)         — count of non-disabled users in this tenant
+  ActiveModules (int)       — count of enabled modules
+  Notes?                    — e.g. "shared-tier estimate" when exact per-tenant data unavailable
+```
+
+Collection: background job in `CI.Platform.Billing` runs nightly (Workflow timer step). Per-tenant DB size queried with `SELECT pg_database_size('db_name')` (Postgres). Storage queried from SeaweedFS collection stats or prefix-level byte count.
+
+**Shared-tier metering note:** `pg_database_size()` on a shared DB returns the full DB size, not the per-tenant slice. On shared tier, `DbSizeBytes` is null and sysadmin P&L estimates tenant cost from total shared DB cost / tenant count. On `own` and `own-server` tiers, `DbSizeBytes` is exact.
+
+### CloudSku — Azure Retail Prices integration
+
+Platform sysadmin can import Azure VM and managed DB SKUs to calculate the true cost of dedicated infrastructure offered to enterprise tenants.
+
+```
+CloudSku
+  Id, Provider ("azure" | "do" | "aws" | …)
+  Region (string)          — e.g. "polandcentral", "westeurope", "eastus"
+  SkuName                  — Azure: "Standard_D2s_v5" | DO: "db-s-2vcpu-4gb"
+  Type: Compute | ManagedDb | Storage | Bandwidth
+  vCpus?, RamGb?, StorageGb?, BandwidthGb?
+  PricePerHourUsd (decimal)
+  PricePerMonthUsd (decimal)
+  Currency ("USD")
+  FetchedAt               — last sync from Azure Retail Prices API
+  IsActive
+```
+
+Azure Retail Prices API: `GET https://prices.azure.com/api/retail/prices?$filter=…` — public, no auth required.
+Sync is a background job triggered manually by sysadmin or scheduled weekly. Feature-flagged off by default (`feature_flags.azure_price_sync = false`).
+
+### Sysadmin P&L view
+
+`GET /api/admin/billing/pl-dashboard` returns:
+- Total tenants by tier (shared / own / own-server)
+- Estimated infra cost per enterprise tenant (from `CloudSku` matched to `EnterpriseDeal.DbTierOverride` / `RegionOverride`)
+- MRR (monthly recurring revenue from active Subscriptions × PlanPrice)
+- Estimated margin per tenant tier
+
+This is a pure calculation — no separate entity. Reads `Subscription`, `PlanPrice`, `EnterpriseDeal`, `CloudSku`, `TenantResourceSnapshot`.
+
+### Feature flags for future infra options
+
+These are off by default and enabled per-tenant or globally by sysadmin:
+
+| Flag key | Default | Controls |
+|---|---|---|
+| `infra.dedicated_db` | false | Whether `own` / `own-server` DB tier is offered |
+| `infra.dedicated_storage` | false | Whether `own` / `own-server` storage tier is offered |
+| `infra.multi_region` | false | Whether `RegionOverride` is honoured during provisioning |
+| `billing.azure_price_sync` | false | Whether Azure Retail Prices API sync job runs |
+| `billing.transaction_fee_enabled` | true | Whether transaction fees are deducted on Booking payments |
+
+Stored as `FeatureFlag` rows in `CI.Platform.DevTools` (system-admin scope) or tenant-scoped flags for per-tenant enablement.
+
+---
+
 ## GitHub Actions — Reusable Workflows
 
 ```yaml
@@ -1187,7 +1439,9 @@ Never impersonates. Always uses access-request flow:
 |---|---|---|
 | CI.Platform.Gateway | 80 | public entry point |
 | Keycloak | 8080 | realm `ci-platform`, client `ci-platform-web` |
-| PostgreSQL | 5432 | ci_platform, ci_keycloak, ci_tenants, ci_users |
+| PostgreSQL | 5432 | ci_platform, ci_keycloak, ci_tenants, ci_users, ci_billing |
+| CI.Platform.Tenants | 5001 | tenant CRUD, module registry, plan enforcement |
+| CI.Platform.Billing | 5006 | plans, subscriptions, enterprise deals, effective limits |
 | RabbitMQ | 5672 / 15672 | messaging + management UI |
 | Valkey | 6379 | Redis-compatible cache |
 | Jaeger | 16686 | distributed tracing |
@@ -1271,3 +1525,17 @@ Test credentials: `test / test` on `ci-platform` realm.
 | 2026-08-03 | WorkflowDefinition has Version; WorkflowInstance pins to DefinitionVersion | Running instances must not be affected by definition changes published after they started |
 | 2026-08-03 | Entities with IsActive/IsArchived must filter in every repository query | Soft-deleted records must never appear in normal query results |
 | 2026-08-03 | Cross-module references in billing/legal documents must snapshot at creation | Price and name changes must not alter past legal documents |
+| 2026-08-04 | Plans are configurable DB entities with stable Code slug, not enums/constants | Allows time-limited promotional plans, admin-created plans, enterprise overrides |
+| 2026-08-04 | One global plan tier per tenant — not per-module subscriptions | Simpler billing model to start; module access controlled by PlanAllowedModule join table |
+| 2026-08-04 | PlanPrice child table: one row per (Plan, CurrencyCode, Period) | Multi-currency pricing without duplicating plan entities |
+| 2026-08-04 | ModuleFeatureLimit: per-plan per-module limit rows with null = unlimited | Limits are data, not code; sysadmin can change them without a deploy |
+| 2026-08-04 | Transaction fee stored as basis points (long): 500 = 5.00% | Integer arithmetic avoids float precision issues in fee calculations |
+| 2026-08-04 | EnterpriseDeal: pending → configure → activate lifecycle with full limit + infra overrides | Admin can set price to 0, null out any limit, override DB tier, storage tier, region |
+| 2026-08-04 | GetEffectiveLimits merges plan limits with EnterpriseDeal overrides; falls back to free plan | Billing outage must not lock out tenants — fail-open on null effective limits |
+| 2026-08-04 | IBillingClient in Tenants.Core — NullBillingClient fails open | Module enable must not hard-fail if Billing service is temporarily unreachable |
+| 2026-08-04 | DB tiering: shared → own → own-server; connection strings in OpenBao | Application code never routes by tier — string from vault determines target |
+| 2026-08-04 | Storage tiering: shared SeaweedFS prefix → own bucket → own cluster | IFileStorage abstraction hides tier; credentials in OpenBao |
+| 2026-08-04 | Core platform DBs (tenants, billing, keycloak) on shared PG — never metered per-tenant | Platform infra cost is not attributable to any one tenant |
+| 2026-08-04 | TenantResourceSnapshot: append-only nightly snapshot of storage + DB + user counts | Metering data stays historical; never mutated, only appended |
+| 2026-08-04 | CloudSku table + Azure Retail Prices API sync for sysadmin P&L | Enables margin calculation for dedicated-infra enterprise deals; off by default |
+| 2026-08-04 | Feature flags gate infra options (dedicated_db, multi_region, azure_price_sync) | Deploy early, enable late; no code change needed to activate a tier option |
