@@ -57,6 +57,9 @@ jobs:
             BAGET_API_KEY=${BAGET_API_KEY}
             EOF
 
+            # Open BaGet NuGet port so GitHub Actions can restore packages
+            ufw allow 5555/tcp 2>/dev/null || true
+
             # Make init script executable
             chmod +x init-db.sh
 
