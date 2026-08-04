@@ -904,6 +904,7 @@ services:
       ReverseProxy__Clusters__ci-connector-comarch-optima__Destinations__default__Address: http://ci-connector-comarch-optima:8080
       ReverseProxy__Clusters__ci-connector-ksef__Destinations__default__Address: http://ci-connector-ksef:8080
       ReverseProxy__Clusters__ci-connector-openbanking__Destinations__default__Address: http://ci-connector-openbanking:8080
+      ReverseProxy__Clusters__baget__Destinations__default__Address: http://baget:8080
     depends_on:
       ci-platform-tenants:
         condition: service_started
