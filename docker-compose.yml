@@ -1,6 +1,6 @@
 services:
 
-  # ── Infrastructure ──────────────────────────────────────────────────────
+  # ── Infrastructure ──────────────────────────────────────────────────────────
 
   postgres:
     image: postgis/postgis:16-3.4
@@ -142,7 +142,7 @@ services:
       - prometheus
       - jaeger
 
-  # ── Platform Services (images from GHCR, no local build) ────────────────
+  # ── Platform Core Services ──────────────────────────────────────────────────
 
   ci-platform-tenants:
     image: ghcr.io/maciejmajchrzak/ci-platform-tenants:latest
@@ -157,6 +157,7 @@ services:
       RabbitMQ__Password: ${RABBITMQ_PASSWORD}
       Keycloak__Authority: http://keycloak:8080/realms/ci-platform
       Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
       postgres:
@@ -183,6 +184,7 @@ services:
       RabbitMQ__Password: ${RABBITMQ_PASSWORD}
       Keycloak__Authority: http://keycloak:8080/realms/ci-platform
       Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
       postgres:
@@ -196,6 +198,648 @@ services:
       retries: 5
       start_period: 60s
 
+  ci-platform-country-config:
+    image: ghcr.io/maciejmajchrzak/ci-platform-country-config:latest
+    container_name: ci-platform-country-config
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__CountryConfig: Host=postgres;Database=ci_country_config;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-platform-billing:
+    image: ghcr.io/maciejmajchrzak/ci-platform-billing:latest
+    container_name: ci-platform-billing
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Billing: Host=postgres;Database=ci_billing;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-platform-workflow:
+    image: ghcr.io/maciejmajchrzak/ci-platform-workflow:latest
+    container_name: ci-platform-workflow
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Workflow: Host=postgres;Database=ci_workflow;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-platform-devtools:
+    image: ghcr.io/maciejmajchrzak/ci-platform-devtools:latest
+    container_name: ci-platform-devtools
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__DevTools: Host=postgres;Database=ci_devtools;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-platform-notifications:
+    image: ghcr.io/maciejmajchrzak/ci-platform-notifications:latest
+    container_name: ci-platform-notifications
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Notifications: Host=postgres;Database=ci_notifications;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-platform-documents:
+    image: ghcr.io/maciejmajchrzak/ci-platform-documents:latest
+    container_name: ci-platform-documents
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Documents: Host=postgres;Database=ci_documents;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-platform-search:
+    image: ghcr.io/maciejmajchrzak/ci-platform-search:latest
+    container_name: ci-platform-search
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Search: Host=postgres;Database=ci_search;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-platform-public-discovery:
+    image: ghcr.io/maciejmajchrzak/ci-platform-public-discovery:latest
+    container_name: ci-platform-public-discovery
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__PublicDiscovery: Host=postgres;Database=ci_public_discovery;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-platform-identity:
+    image: ghcr.io/maciejmajchrzak/ci-platform-identity:latest
+    container_name: ci-platform-identity
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # ── Business Modules ────────────────────────────────────────────────────────
+
+  ci-module-parties:
+    image: ghcr.io/maciejmajchrzak/ci-module-parties:latest
+    container_name: ci-module-parties
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Parties: Host=postgres;Database=ci_parties;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-module-invoicing:
+    image: ghcr.io/maciejmajchrzak/ci-module-invoicing:latest
+    container_name: ci-module-invoicing
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Invoicing: Host=postgres;Database=ci_invoicing;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-module-legal:
+    image: ghcr.io/maciejmajchrzak/ci-module-legal:latest
+    container_name: ci-module-legal
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Legal: Host=postgres;Database=ci_legal;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-module-payments:
+    image: ghcr.io/maciejmajchrzak/ci-module-payments:latest
+    container_name: ci-module-payments
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Payments: Host=postgres;Database=ci_payments;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-module-booking:
+    image: ghcr.io/maciejmajchrzak/ci-module-booking:latest
+    container_name: ci-module-booking
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Booking: Host=postgres;Database=ci_booking;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-module-catalog:
+    image: ghcr.io/maciejmajchrzak/ci-module-catalog:latest
+    container_name: ci-module-catalog
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Catalog: Host=postgres;Database=ci_catalog;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-module-warehouse:
+    image: ghcr.io/maciejmajchrzak/ci-module-warehouse:latest
+    container_name: ci-module-warehouse
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Warehouse: Host=postgres;Database=ci_warehouse;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-module-hr:
+    image: ghcr.io/maciejmajchrzak/ci-module-hr:latest
+    container_name: ci-module-hr
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__HR: Host=postgres;Database=ci_hr;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-module-tasks:
+    image: ghcr.io/maciejmajchrzak/ci-module-tasks:latest
+    container_name: ci-module-tasks
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Tasks: Host=postgres;Database=ci_tasks;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-module-accounting:
+    image: ghcr.io/maciejmajchrzak/ci-module-accounting:latest
+    container_name: ci-module-accounting
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Accounting: Host=postgres;Database=ci_accounting;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-module-marketing:
+    image: ghcr.io/maciejmajchrzak/ci-module-marketing:latest
+    container_name: ci-module-marketing
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Marketing: Host=postgres;Database=ci_marketing;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # ── Connectors ──────────────────────────────────────────────────────────────
+
+  ci-connector-slack:
+    image: ghcr.io/maciejmajchrzak/ci-connector-slack:latest
+    container_name: ci-connector-slack
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-connector-comarch-optima:
+    image: ghcr.io/maciejmajchrzak/ci-connector-comarch-optima:latest
+    container_name: ci-connector-comarch-optima
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-connector-ksef:
+    image: ghcr.io/maciejmajchrzak/ci-connector-ksef:latest
+    container_name: ci-connector-ksef
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__KSeF: Host=postgres;Database=ci_ksef;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  ci-connector-openbanking:
+    image: ghcr.io/maciejmajchrzak/ci-connector-openbanking:latest
+    container_name: ci-connector-openbanking
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__OpenBanking: Host=postgres;Database=ci_openbanking;Username=ci;Password=${POSTGRES_PASSWORD}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ci
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Keycloak__Authority: http://keycloak:8080/realms/ci-platform
+      Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # ── Gateway ─────────────────────────────────────────────────────────────────
+
   ci-platform-gateway:
     image: ghcr.io/maciejmajchrzak/ci-platform-gateway:latest
     container_name: ci-platform-gateway
@@ -207,10 +851,36 @@ services:
       ASPNETCORE_URLS: http://+:8080
       Keycloak__Authority: http://keycloak:8080/realms/ci-platform
       Keycloak__Audience: account
-      Services__Users: http://ci-platform-users:8080
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      # Platform clusters
       ReverseProxy__Clusters__ci-platform-tenants__Destinations__default__Address: http://ci-platform-tenants:8080
       ReverseProxy__Clusters__ci-platform-users__Destinations__default__Address: http://ci-platform-users:8080
+      ReverseProxy__Clusters__ci-platform-country-config__Destinations__default__Address: http://ci-platform-country-config:8080
+      ReverseProxy__Clusters__ci-platform-billing__Destinations__default__Address: http://ci-platform-billing:8080
+      ReverseProxy__Clusters__ci-platform-workflow__Destinations__default__Address: http://ci-platform-workflow:8080
+      ReverseProxy__Clusters__ci-platform-devtools__Destinations__default__Address: http://ci-platform-devtools:8080
+      ReverseProxy__Clusters__ci-platform-notifications__Destinations__default__Address: http://ci-platform-notifications:8080
+      ReverseProxy__Clusters__ci-platform-documents__Destinations__default__Address: http://ci-platform-documents:8080
+      ReverseProxy__Clusters__ci-platform-search__Destinations__default__Address: http://ci-platform-search:8080
+      ReverseProxy__Clusters__ci-platform-public-discovery__Destinations__default__Address: http://ci-platform-public-discovery:8080
+      ReverseProxy__Clusters__ci-platform-identity__Destinations__default__Address: http://ci-platform-identity:8080
+      # Module clusters
+      ReverseProxy__Clusters__ci-module-parties__Destinations__default__Address: http://ci-module-parties:8080
+      ReverseProxy__Clusters__ci-module-invoicing__Destinations__default__Address: http://ci-module-invoicing:8080
+      ReverseProxy__Clusters__ci-module-legal__Destinations__default__Address: http://ci-module-legal:8080
+      ReverseProxy__Clusters__ci-module-payments__Destinations__default__Address: http://ci-module-payments:8080
+      ReverseProxy__Clusters__ci-module-booking__Destinations__default__Address: http://ci-module-booking:8080
+      ReverseProxy__Clusters__ci-module-catalog__Destinations__default__Address: http://ci-module-catalog:8080
+      ReverseProxy__Clusters__ci-module-warehouse__Destinations__default__Address: http://ci-module-warehouse:8080
+      ReverseProxy__Clusters__ci-module-hr__Destinations__default__Address: http://ci-module-hr:8080
+      ReverseProxy__Clusters__ci-module-tasks__Destinations__default__Address: http://ci-module-tasks:8080
+      ReverseProxy__Clusters__ci-module-accounting__Destinations__default__Address: http://ci-module-accounting:8080
+      ReverseProxy__Clusters__ci-module-marketing__Destinations__default__Address: http://ci-module-marketing:8080
+      # Connector clusters
+      ReverseProxy__Clusters__ci-connector-slack__Destinations__default__Address: http://ci-connector-slack:8080
+      ReverseProxy__Clusters__ci-connector-comarch-optima__Destinations__default__Address: http://ci-connector-comarch-optima:8080
+      ReverseProxy__Clusters__ci-connector-ksef__Destinations__default__Address: http://ci-connector-ksef:8080
+      ReverseProxy__Clusters__ci-connector-openbanking__Destinations__default__Address: http://ci-connector-openbanking:8080
     depends_on:
       ci-platform-tenants:
         condition: service_started
