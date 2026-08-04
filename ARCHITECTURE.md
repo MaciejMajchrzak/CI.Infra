@@ -1,6 +1,6 @@
 # CodingInnovators Platform — Architecture
 
-> Last updated: 2026-08-04 (session 5)
+> Last updated: 2026-08-04 (session 6)
 
 ---
 
@@ -1384,6 +1384,243 @@ Stored as `FeatureFlag` rows in `CI.Platform.DevTools` (system-admin scope) or t
 
 ---
 
+## Configuration Storage Hierarchy
+
+Four layers, each with a strict rule about what belongs there. Never put something in a lower layer when a higher one owns it.
+
+### Layer 1 — appsettings / environment variables
+
+**What:** infrastructure bootstrap only. Must be readable before the DB is up.
+
+| Belongs here | Does NOT belong here |
+|---|---|
+| DB connection strings | Grace period durations |
+| Service-to-service URLs (Services:Billing) | Feature flags |
+| Secrets (Keycloak client secret, RabbitMQ password) | Tenant lifecycle timelines |
+| OTLP endpoint | Data retention periods |
+| Keycloak authority | Any business rule |
+
+**Rule:** if it can change without restarting the service, it doesn't belong in appsettings.
+
+### Layer 2 — PlatformConfig table (sysadmin-managed)
+
+Business rules that the platform operator controls. Stored in `ci_platform` DB, cached in Redis with `config:` prefix, TTL 5 minutes. Sysadmin UI at `/admin/platform-config`.
+
+```
+PlatformConfig
+  Key   (string, unique)    — e.g. "lifecycle.past_due_days"
+  Value (string)            — always stored as string, typed at read time
+  Type  (String | Int | Bool | Json)
+  Description
+  UpdatedAt, UpdatedBy
+```
+
+Seeded defaults:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `lifecycle.past_due_days` | `14` | Days of full access after payment failure |
+| `lifecycle.suspended_days` | `30` | Days of read-only access after suspension |
+| `lifecycle.pending_termination_days` | `7` | Final warning window before archive |
+| `lifecycle.data_export_url_valid_days` | `14` | How long the ZIP download link stays valid |
+| `lifecycle.cold_storage_retain_years` | `7` | Years to keep archived tenant blob before hard-delete |
+| `billing.retry_payment_attempts` | `3` | Stripe retry attempts during PastDue |
+| `billing.retry_payment_interval_days` | `3` | Days between Stripe retry attempts |
+| `notifications.past_due_reminder_days` | `[1,7,13]` | Days after PastDue when reminder emails fire |
+
+**Cache pattern:** `GET config:lifecycle.past_due_days` → Redis hit → parse int. Redis miss → read `PlatformConfig` table → write to Redis with 5-minute TTL. Sysadmin update → write DB → publish `config:invalidate:*` to Redis pub/sub → all pods evict their local copies.
+
+### Layer 3 — CountryConfig (seeded legal facts)
+
+Country law is not an operator choice — it is a legal requirement. It lives in `CountryConfig` as seed data, not in `PlatformConfig`. Sysadmin can update it when laws change (e.g. when Poland extends or shortens a retention period), but it is not a tunable business parameter.
+
+**DataRetentionPolicy** — new child of CountryConfig:
+
+```
+DataRetentionPolicy
+  Id, CountryCode (FK → CountryConfig)
+  DocumentTypeCode        — "invoice" | "accounting-book" | "employment-contract" | "payroll" | "personal-data" | "booking" | "general"
+  RetentionYears (int)    — mandatory minimum; null = "until erasure request" (GDPR)
+  CanBeDeletedOnRequest (bool)  — false for legal documents (invoice must be kept 5y even if GDPR request)
+  LegalBasis              — e.g. "Art. 74 UoR", "§ 147 AO", "HMRC VAT Notice 700/21"
+  Notes?
+```
+
+Seeded values:
+
+| Country | DocumentType | Years | CanDelete | Legal basis |
+|---|---|---|---|---|
+| PL | invoice | 5 | false | Art. 74 UoR |
+| PL | accounting-book | 5 | false | Art. 74 UoR |
+| PL | employment-contract | 10 | false | Art. 94 KP (since 2019) |
+| PL | payroll | 10 | false | Art. 94 KP |
+| PL | personal-data | null | true | GDPR Art. 17 |
+| PL | booking | null | true | GDPR Art. 17 |
+| PL | general | null | true | GDPR Art. 17 |
+| DE | invoice | 10 | false | § 147 AO |
+| DE | accounting-book | 10 | false | § 147 AO |
+| DE | personal-data | null | true | DSGVO Art. 17 |
+| GB | invoice | 6 | false | HMRC VAT Notice 700/21 |
+| GB | payroll | 3 | false | HMRC PAYE rules |
+| GB | personal-data | null | true | UK GDPR Art. 17 |
+
+**Rule:** when Billing archives a terminated tenant, it reads the tenant's `CountryCode` (from their OwnParty), loads `DataRetentionPolicy` rows for that country, and archives each document type according to its retention rule. Documents where `CanBeDeletedOnRequest = false` go to cold storage and are NOT deleted even on GDPR erasure request — the platform must inform the subject that legal retention overrides the request.
+
+### Layer 4 — Tenant-level overrides
+
+Where the plan explicitly permits it (enterprise deals). Already modelled in `EnterpriseDeal`. Not in scope for standard plans.
+
+---
+
+## Zero-Downtime DB Migrations
+
+**Rule: the startup `MigrateAsync()` pattern is dev-only.** In production, migrations run as a separate step before deployment, not inside the service startup.
+
+### Expand-contract pattern (3-phase deploy)
+
+Every schema change that removes or renames something requires three separate deploys:
+
+```
+Phase 1 — Expand (deploy new version):
+  Only ADD: nullable columns, new tables, new indexes.
+  Old version and new version both work on the schema simultaneously.
+  No data loss possible.
+
+Phase 2 — Backfill (background migration job):
+  Fill nullable columns with computed or migrated data.
+  Run per-tenant for own-DB and own-server tiers (parallel, rate-limited).
+  Set ModuleStatus = Migrating during this phase per tenant.
+  Set ModuleStatus = Active when done.
+  Shared tier: one DB, one job, fast.
+  Own-DB tier: one job per tenant DB, runs concurrently up to N workers.
+  Own-server tier: same, but may need VPN/tunnel to reach the dedicated server.
+
+Phase 3 — Contract (next deploy, days or weeks later):
+  Add NOT NULL constraints, remove old columns, rename columns.
+  Safe because no running code reads the old schema anymore.
+```
+
+**Rule: additive-only migrations in Phase 1 never require a maintenance window.** Only Phase 3 can cause issues and only if Phase 2 was incomplete — the architecture test enforces that Phase 3 migrations are never deployed to a tenant whose Phase 2 job has not completed (`ModuleStatus = Active`).
+
+### ModuleStatus — module-level health visible to the Gateway
+
+`EnabledModule` in Tenants gets a `Status` field:
+
+```
+ModuleStatus: Active | Migrating | Degraded | Suspended
+```
+
+| Status | GET requests | POST/PUT/DELETE | Shown to user |
+|---|---|---|---|
+| Active | ✅ pass | ✅ pass | nothing |
+| Migrating | ✅ pass | ❌ 503 + Retry-After | "Module is being updated, try again in a moment" |
+| Degraded | ✅ pass | ⚠️ pass with warning header | "Module is experiencing issues" |
+| Suspended | ❌ 402 | ❌ 402 | "Module suspended — update billing to restore access" |
+
+Gateway reads `ModuleStatus` from a Redis projection (`module-status:{tenantId}:{moduleCode}`) on every request — no DB hit on the hot path. Migration job writes to DB + invalidates Redis key when it completes.
+
+**Connector health** follows the same model. A connector (KSeF, Slack) sets itself to `Degraded` on startup if its external API is unreachable, `Active` when healthy. No DB involved — it's a heartbeat that writes the Redis key directly.
+
+---
+
+## Tenant Lifecycle After Non-Payment
+
+### Status progression
+
+```
+Active
+  ↓  PaymentFailedEvent (Stripe webhook)
+PastDue  (0–N days, default 14 from PlatformConfig)
+  ↓  PastDue timer expires and no payment received
+Suspended  (0–M days, default 30)
+  ↓  Suspended timer expires
+PendingTermination  (0–P days, default 7)
+  ↓  PendingTermination timer expires
+Terminated
+```
+
+At any point, `PaymentSucceededEvent` → resets to `Active`, cancels all timer steps.
+
+### What each status means at the API level
+
+`Subscription.Status` is projected to Redis key `tenant-status:{tenantId}` (same cache pattern as ModuleStatus). Gateway reads it on every authenticated request.
+
+| Status | Reads | Writes | UI |
+|---|---|---|---|
+| Active | ✅ | ✅ | — |
+| PastDue | ✅ | ✅ | In-app banner: "Payment failed — update card to avoid interruption" |
+| Suspended | ✅ | ❌ 402 | Banner: "Account suspended — reads only until billing is resolved" |
+| PendingTermination | ❌ 410 Gone | ❌ 410 Gone | — (email only) |
+| Terminated | ❌ 410 Gone | ❌ 410 Gone | — |
+
+### Notification timeline (driven by Workflow timer steps)
+
+```
+PastDue Day 0:   Email "Payment failed, we'll retry in 3 days"
+PastDue Day 1:   In-app notification
+PastDue Day 7:   Email "Still unpaid — account will be suspended in 7 days"
+PastDue Day 13:  Email "Last warning — suspension tomorrow"
+PastDue Day 14:  → set Suspended, email "Account is now suspended (read-only)"
+
+Suspended Day 1:  Email "Your data is safe but writes are blocked"
+Suspended Day 16: Email "Account will be deleted in 14 days — export your data now"
+Suspended Day 16: Auto-generate data export ZIP (background job)
+Suspended Day 17: Email data export download link (valid for 14 days)
+Suspended Day 29: Email "7 days until deletion"
+Suspended Day 30: → set PendingTermination
+
+PendingTermination Day 0: Email "All access blocked. Download link still valid"
+PendingTermination Day 7: → archive DBs + S3, set Terminated
+
+Terminated Day 0: Email "Account archived. Download link valid N more days"
+```
+
+### Data export ZIP (generated on Suspended Day 16)
+
+Contents:
+- All invoices as PDFs (rendered by CI.Platform.Documents)
+- Invoices as JSON / CSV
+- Appointments as CSV
+- Parties (clients, contractors) as JSON
+- Bookings as CSV
+- Any other tenant-owned data as JSON
+
+Stored in SeaweedFS cold bucket: `terminated/{tenantId}/export-{date}.zip`
+Time-limited download URL: signed URL, valid `lifecycle.data_export_url_valid_days` (default 14).
+
+### Archival (Terminated Day 0)
+
+1. For each module DB the tenant has:
+   - Export as SQL dump → store as `terminated/{tenantId}/{module}-{date}.sql.gz` in cold storage
+   - Drop the tenant's own DB (own-DB tier) or mark their rows for deletion (shared tier)
+2. Move SeaweedFS files from `tenants/{tenantId}/` prefix to `cold/{tenantId}/`
+3. Read `DataRetentionPolicy` for the tenant's country:
+   - Documents where `CanBeDeletedOnRequest = false` (invoices, accounting): kept in cold storage for `RetentionYears`
+   - Everything else: scheduled for deletion after `lifecycle.cold_storage_retain_years` (default 7, from PlatformConfig)
+4. Set `Tenant.IsTerminated = true`, `TerminatedAt = now`
+5. Purge Redis keys for this tenant (`tenant-status:`, `module-status:`, `config:` projections)
+
+### GDPR erasure request during active subscription
+
+A tenant or end-customer can request erasure of personal data at any time:
+- Personal data (name, email, phone in Parties, Appointments) → anonymised in-place (replaced with `[deleted]` + hash of original for deduplication)
+- Documents where `DataRetentionPolicy.CanBeDeletedOnRequest = false` (invoices): NOT deleted — the platform must respond explaining that legal retention takes precedence, and what the exact legal basis is (from `DataRetentionPolicy.LegalBasis`)
+- Booking history, analytics: deleted
+- All deletion is logged in an append-only `GdprErasureLog` table
+
+```
+GdprErasureLog
+  Id, TenantId, RequestedBy, RequestedAt
+  SubjectType (Tenant | EndCustomer | Employee)
+  SubjectId
+  Status: Pending | PartiallyCompleted | Completed
+  CompletedAt?
+  RetainedDocumentTypes (CSV)  — types kept for legal reasons
+  LegalBasisNote               — human-readable explanation sent to the requester
+```
+
+---
+
 ## GitHub Actions — Reusable Workflows
 
 ```yaml
@@ -1539,3 +1776,14 @@ Test credentials: `test / test` on `ci-platform` realm.
 | 2026-08-04 | TenantResourceSnapshot: append-only nightly snapshot of storage + DB + user counts | Metering data stays historical; never mutated, only appended |
 | 2026-08-04 | CloudSku table + Azure Retail Prices API sync for sysadmin P&L | Enables margin calculation for dedicated-infra enterprise deals; off by default |
 | 2026-08-04 | Feature flags gate infra options (dedicated_db, multi_region, azure_price_sync) | Deploy early, enable late; no code change needed to activate a tier option |
+| 2026-08-04 | Four-layer config hierarchy: appsettings (infra) → PlatformConfig (business rules) → CountryConfig (legal facts) → tenant overrides | Each layer has a single owner and a clear rule about what belongs there |
+| 2026-08-04 | appsettings/env vars hold infrastructure only — no business rules, no timelines, no feature flags | Business rules in appsettings require a redeploy to change; PlatformConfig changes at runtime |
+| 2026-08-04 | PlatformConfig table (sysadmin-managed, Redis-cached) for lifecycle timelines, retry counts, feature flags | Operator can change grace periods without a deploy; Redis cache with pub/sub invalidation across pods |
+| 2026-08-04 | DataRetentionPolicy as a child of CountryConfig — legal retention per document type per country | Country law (PL: 5y invoices, DE: 10y, GB: 6y) is a legal fact, not an operator choice; drives archival on termination |
+| 2026-08-04 | CanBeDeletedOnRequest = false on legal documents overrides GDPR erasure requests | Platform must retain invoices for legal period even on Art. 17 request; LegalBasis field provides the explanation |
+| 2026-08-04 | Expand-contract 3-phase migration pattern — no startup MigrateAsync in production | Additive Phase 1 is zero-downtime; Phase 3 (removal) only after all tenant DBs backfilled |
+| 2026-08-04 | ModuleStatus (Active/Migrating/Degraded/Suspended) projected to Redis, read by Gateway on every request | Migration sets Migrating per tenant, blocks writes, unblocks when done — no maintenance window needed |
+| 2026-08-04 | Tenant lifecycle: PastDue → Suspended → PendingTermination → Terminated, driven by Workflow timer steps | Each phase has defined access level (full/read-only/none); PaymentSucceededEvent cancels the chain at any point |
+| 2026-08-04 | Data export ZIP auto-generated on Suspended Day 16, stored in cold storage, download link valid 14 days | Platform obligation is to offer export with reasonable notice; if tenant ignores it, that is their responsibility |
+| 2026-08-04 | Archival on Terminated: SQL dump per module DB + S3 move to cold bucket; legal docs retained per DataRetentionPolicy | Own-DB tier: drop DB after dump. Shared tier: delete rows. Legal retention wins over cold_storage_retain_years |
+| 2026-08-04 | GdprErasureLog append-only table tracks all erasure requests and which document types were legally retained | Audit trail for DPA requests; RetainedDocumentTypes + LegalBasisNote form the required response to the subject |
