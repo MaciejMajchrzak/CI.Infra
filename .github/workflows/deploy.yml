@@ -64,11 +64,14 @@ jobs:
             # Wipe current state including postgres volume so init-db.sh always runs clean
             docker compose down --volumes --remove-orphans || true
 
-            # Pull latest images
-            docker compose pull
+            # Pull latest images — services with no image yet are skipped gracefully
+            docker compose pull --ignore-pull-failures
 
-            # Start everything
-            docker compose up -d
+            # Start infrastructure + services whose images exist; skip those still missing
+            docker compose up -d --remove-orphans || true
+
+            # Ensure infra is up even if app services failed
+            docker compose up -d postgres valkey rabbitmq keycloak seaweedfs-master seaweedfs-volume seaweedfs-filer openbao jaeger prometheus grafana
 
             # Run Keycloak setup (creates realm, client, mapper, test user)
             chmod +x keycloak-setup.sh
