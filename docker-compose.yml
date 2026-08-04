@@ -181,6 +181,7 @@ services:
       Keycloak__Authority: http://keycloak:8080/realms/ci-platform
       Keycloak__Audience: account
       ConnectionStrings__Redis: valkey:6379
+      Services__Billing: http://ci-platform-billing:8080
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
       postgres:
@@ -582,6 +583,7 @@ services:
       Keycloak__Authority: http://keycloak:8080/realms/ci-platform
       Keycloak__Audience: account
       ConnectionStrings__Redis: valkey:6379
+      Services__Billing: http://ci-platform-billing:8080
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
       postgres:
