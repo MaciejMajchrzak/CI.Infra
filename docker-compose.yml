@@ -132,6 +132,14 @@ services:
       - prometheus
       - jaeger
 
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: ci-mailpit
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+
   baget:
     image: bagetter/bagetter:latest
     container_name: ci-baget
@@ -334,12 +342,18 @@ services:
       Keycloak__Authority: http://keycloak:8080/realms/ci-platform
       Keycloak__Audience: account
       ConnectionStrings__Redis: valkey:6379
+      Smtp__Host: mailpit
+      Smtp__Port: "1025"
+      Smtp__From: noreply@codinginnova.com
+      Smtp__EnableSsl: "false"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      mailpit:
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080' 2>/dev/null || exit 1"]
       interval: 15s
