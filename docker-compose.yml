@@ -66,6 +66,27 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || curl -sf http://localhost:8080/realms/master > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 60s
+
+  keycloak-init:
+    image: curlimages/curl:8.7.1
+    container_name: ci-keycloak-init
+    restart: "no"
+    environment:
+      KC_URL: http://keycloak:8080
+      KC_ADMIN: admin
+      KC_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+    volumes:
+      - ./keycloak-setup.sh:/keycloak-setup.sh:ro
+    entrypoint: ["sh", "/keycloak-setup.sh"]
+    depends_on:
+      keycloak:
+        condition: service_healthy
 
   seaweedfs-master:
     image: chrislusf/seaweedfs:3.71
@@ -447,9 +468,12 @@ services:
       ASPNETCORE_URLS: http://+:8080
       Keycloak__Authority: http://keycloak:8080/realms/ci-platform
       Keycloak__Audience: account
+      ConnectionStrings__Identity: Host=postgres;Database=ci_identity;Username=ci;Password=${POSTGRES_PASSWORD}
       ConnectionStrings__Redis: valkey:6379
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
+      postgres:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     healthcheck:
@@ -769,6 +793,7 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Slack: Host=postgres;Database=ci_slack;Username=ci;Password=${POSTGRES_PASSWORD}
       RabbitMQ__Host: rabbitmq
       RabbitMQ__Username: ci
       RabbitMQ__Password: ${RABBITMQ_PASSWORD}
@@ -777,6 +802,8 @@ services:
       ConnectionStrings__Redis: valkey:6379
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
+      postgres:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     healthcheck:
@@ -793,6 +820,7 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Optima: Host=postgres;Database=ci_optima;Username=ci;Password=${POSTGRES_PASSWORD}
       RabbitMQ__Host: rabbitmq
       RabbitMQ__Username: ci
       RabbitMQ__Password: ${RABBITMQ_PASSWORD}
@@ -801,6 +829,8 @@ services:
       ConnectionStrings__Redis: valkey:6379
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
+      postgres:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     healthcheck:

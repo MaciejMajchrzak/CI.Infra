@@ -28,4 +28,7 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<-EOSQL
     SELECT 'CREATE DATABASE ci_marketing'         WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ci_marketing')\gexec
     SELECT 'CREATE DATABASE ci_ksef'              WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ci_ksef')\gexec
     SELECT 'CREATE DATABASE ci_openbanking'       WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ci_openbanking')\gexec
+    SELECT 'CREATE DATABASE ci_identity'          WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ci_identity')\gexec
+    SELECT 'CREATE DATABASE ci_slack'             WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ci_slack')\gexec
+    SELECT 'CREATE DATABASE ci_optima'            WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ci_optima')\gexec
 EOSQL
