@@ -877,6 +877,8 @@ services:
       ASPNETCORE_URLS: http://+:8080
       Keycloak__Authority: http://keycloak:8080/realms/ci-platform
       Keycloak__Audience: account
+      ConnectionStrings__Redis: valkey:6379
+      Services__Users: http://ci-platform-users:8080
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       # Platform clusters
       ReverseProxy__Clusters__ci-platform-tenants__Destinations__default__Address: http://ci-platform-tenants:8080
