@@ -27,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +35,9 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ inputs.dotnet-version }}
+          source-url: https://nuget.pkg.github.com/MaciejMajchrzak/index.json
+        env:
+          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Restore
         run: dotnet restore
@@ -91,7 +95,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             API_PROJECT=${{ inputs.api-project }}
-            BAGET_URL=http://${{ secrets.DROPLET_HOST }}:5555/v3/index.json
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
