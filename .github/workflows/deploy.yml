@@ -64,7 +64,7 @@ jobs:
             # Login to GHCR so docker can pull private images
             echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
 
-            # Stop containers but KEEP volumes (BaGet packages, postgres data must persist)
+            # Stop containers but KEEP volumes (postgres data must persist)
             docker compose down --remove-orphans || true
 
             # Pull latest images — services with no image yet are skipped gracefully
