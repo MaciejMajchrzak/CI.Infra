@@ -476,6 +476,7 @@ services:
       Keycloak__Audience: account
       ConnectionStrings__Redis: valkey:6379
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      Services__CountryConfig: http://ci-platform-country-config:8080
     depends_on:
       postgres:
         condition: service_healthy
