@@ -1,6 +1,6 @@
 # CodingInnovators Platform — Architecture
 
-> Last updated: 2026-08-04 (session 6)
+> Last updated: 2026-08-05 (session 7)
 
 ---
 
@@ -36,7 +36,7 @@ Platform/
 
 Modules/  (business domains — per-tenant, each has own DB)
   CI.Module.Parties             ← Organization, Individual, Branch, roles, relationships
-  CI.Module.Invoicing           ← invoices, credit notes, numbering series
+  CI.Module.Invoicing           ← invoices, credit notes, flexible numbering engine
   CI.Module.Legal               ← contracts, signatures, compliance tasks
   CI.Module.Payments            ← Stripe / Stripe Connect / Tap to Pay
   CI.Module.Booking             ← services, resources, appointments, bundles, subscriptions
@@ -602,6 +602,90 @@ MerchantAccount              — per-branch provider account (Marketplace mode)
 ```
 
 **FinancialDaySummary and multi-currency:** one row per `(TenantId, Date, Currency)` — never sum across currencies. Tenants operating in EUR and PLN get two rows per day, one per currency.
+
+---
+
+## CI.Module.Invoicing — Numbering Engine
+
+Shipped in CI.Kernel 1.3.0. All document numbering lives in `CI.Kernel` so any module (Invoicing, Legal, Warehouse) can reuse it without a cross-module dependency.
+
+### Template string syntax
+
+Numbers are rendered from a `varchar(500)` pattern stored in `NumberingSeries.Pattern`. Any combination of tokens and literal text is valid:
+
+| Token | Output | Notes |
+|---|---|---|
+| `{yyyy}` | 4-digit year | `2026` |
+| `{yy}` | 2-digit year | `26` |
+| `{MM}` | zero-padded month | `08` |
+| `{M}` | bare month | `8` |
+| `{dd}` | zero-padded day | `05` |
+| `{d}` | bare day | `5` |
+| `{#####}` | sequence, padded to hash count | `00042` |
+| `{#}` | sequence, no padding | `42` |
+
+Literal text and separators can appear anywhere — `FV/{yyyy}/{MM}/{#####}` → `FV/2026/08/00001`.
+
+### NumberingSeries entity (in CI.Kernel)
+
+```
+NumberingSeries : BaseEntity
+  TenantId
+  DocumentTypeCode    — "invoice" | "proforma" | "credit" | "debit" | any string
+  ScopeId?            — null = tenant-wide; set to a BranchId for branch-level series
+  Pattern             — template string e.g. "FV/{yyyy}/{MM}/{#####}"
+  ResetPolicy         — Never | Yearly | Monthly | Daily
+  CurrentValue        — current counter value
+  LastResetAt?
+
+  → unique index on (TenantId, DocumentTypeCode, ScopeId)
+```
+
+### AllocateAsync — concurrency
+
+5-retry optimistic loop. On `DbUpdateConcurrencyException` (xmin changed by concurrent allocation), clears EF change tracker and reloads the series fresh before retrying. Auto-creates a series with a sensible default pattern on first allocation:
+
+| DocumentTypeCode | Default pattern |
+|---|---|
+| `invoice` | `FV/{yyyy}/{MM}/{#####}` |
+| `receipt` | `PA/{yyyy}/{MM}/{#####}` |
+| `proforma` | `PRO/{yyyy}/{MM}/{#####}` |
+| anything else | `KOR/{yyyy}/{MM}/{#####}` |
+
+### Integration with CreateInvoice
+
+`CreateInvoiceCommand.Number` is optional. If omitted, `CreateInvoiceHandler` calls `numbering.AllocateAsync(tenantId, docTypeCode, now, scopeId)` to auto-assign a number. If supplied, uniqueness is checked against existing invoices first.
+
+---
+
+## CI.Module.Payments — Stripe Implementation Detail
+
+The ARCHITECTURE.md design specifies a generic `IPaymentProvider` in CI.Kernel. The current implementation uses Stripe-specific clients internally within the Payments module:
+
+```csharp
+// Internal to CI.Module.Payments — not in CI.Kernel
+public interface IStripeClient
+{
+    Task<StripePaymentIntentResult?> CreatePaymentIntentAsync(...);
+    Task<StripePaymentIntentResult?> CreateMarketplacePaymentIntentAsync(...);
+    Task<string?> CapturePaymentIntentAsync(...);
+    Task<string?> RefundPaymentIntentAsync(...);
+}
+
+public interface IStripeConnectClient
+{
+    Task<string?> CreateAccountAsync(...);
+    Task<string?> GetOnboardingUrlAsync(...);
+    Task<StripeAccountStatus> GetAccountStatusAsync(...);
+}
+```
+
+`HttpStripeClient` / `HttpStripeConnectClient` — raw HTTP to `api.stripe.com` (no Stripe SDK dependency).
+`NullStripeClient` / `NullStripeConnectClient` — return fake IDs when `Stripe:SecretKey` is empty (dev/test).
+
+**Migration path to IPaymentProvider:** when a second provider is needed, wrap `IStripeClient` behind `StripePaymentProvider : IPaymentProvider` and register both. No domain entity changes needed — `PaymentTransaction` already uses `ProviderName` + `ProviderTransactionRef`.
+
+**Webhook security:** `StripeWebhookController` verifies HMAC-SHA256 (`Stripe-Signature` header, `t=` + `v1=` parts) with `CryptographicOperations.FixedTimeEquals`. 300-second replay guard. Empty `Stripe:WebhookSecret` is a hard startup fault (not a graceful skip). `StripeWebhookEvent` table provides idempotency — duplicate deliveries are detected and skipped.
 
 ---
 
@@ -1787,3 +1871,7 @@ Test credentials: `test / test` on `ci-platform` realm.
 | 2026-08-04 | Data export ZIP auto-generated on Suspended Day 16, stored in cold storage, download link valid 14 days | Platform obligation is to offer export with reasonable notice; if tenant ignores it, that is their responsibility |
 | 2026-08-04 | Archival on Terminated: SQL dump per module DB + S3 move to cold bucket; legal docs retained per DataRetentionPolicy | Own-DB tier: drop DB after dump. Shared tier: delete rows. Legal retention wins over cold_storage_retain_years |
 | 2026-08-04 | GdprErasureLog append-only table tracks all erasure requests and which document types were legally retained | Audit trail for DPA requests; RetainedDocumentTypes + LegalBasisNote form the required response to the subject |
+| 2026-08-05 | NumberingEngine shipped in CI.Kernel 1.3.0 — template string `varchar(500)`, not JSON column | Single source for numbering across Invoicing, Legal, Warehouse; varchar avoids JSON parsing on every allocation; template is human-readable and editable by sysadmin |
+| 2026-08-05 | NumberingSeries uses 5-retry optimistic loop with xmin + ChangeTracker.Clear() | High-concurrency invoice creation needs retry; clearing the tracker forces a fresh reload of the series row rather than using a stale EF-tracked state |
+| 2026-08-05 | Stripe implemented as IStripeClient / IStripeConnectClient (Stripe-specific) within CI.Module.Payments, not as generic IPaymentProvider yet | Second provider not needed now; wrapping IStripeClient behind IPaymentProvider is a one-file refactor when the time comes — no domain schema change |
+| 2026-08-05 | StripeWebhookController: empty WebhookSecret = hard startup fault, not a graceful skip | Graceful skip means all webhook traffic is accepted without verification in dev — silent security hole; fail fast forces the operator to notice |
