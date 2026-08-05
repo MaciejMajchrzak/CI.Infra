@@ -88,37 +88,6 @@ services:
       keycloak:
         condition: service_healthy
 
-  seaweedfs-master:
-    image: chrislusf/seaweedfs:3.71
-    container_name: ci-seaweedfs-master
-    ports:
-      - "9333:9333"
-      - "19333:19333"
-    command: master -mdir=/data
-    volumes:
-      - seaweedfs_master:/data
-
-  seaweedfs-volume:
-    image: chrislusf/seaweedfs:3.71
-    container_name: ci-seaweedfs-volume
-    ports:
-      - "8333:8333"
-    command: volume -mserver=seaweedfs-master:9333 -port=8333 -dir=/data
-    volumes:
-      - seaweedfs_volume:/data
-    depends_on:
-      - seaweedfs-master
-
-  seaweedfs-filer:
-    image: chrislusf/seaweedfs:3.71
-    container_name: ci-seaweedfs-filer
-    ports:
-      - "8888:8888"
-    command: filer -master=seaweedfs-master:9333
-    depends_on:
-      - seaweedfs-master
-      - seaweedfs-volume
-
   openbao:
     image: openbao/openbao:2.0
     container_name: ci-openbao
@@ -575,6 +544,9 @@ services:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:8080
       ConnectionStrings__Payments: Host=postgres;Database=ci_payments;Username=ci;Password=${POSTGRES_PASSWORD}
+      Stripe__SecretKey: ${STRIPE_SECRET_KEY}
+      Stripe__WebhookSecret: ${STRIPE_WEBHOOK_SECRET}
+      Stripe__PlatformFeeBps: ${STRIPE_PLATFORM_FEE_BPS:-250}
       RabbitMQ__Host: rabbitmq
       RabbitMQ__Username: ci
       RabbitMQ__Password: ${RABBITMQ_PASSWORD}
@@ -948,7 +920,5 @@ services:
 
 volumes:
   postgres_data:
-  seaweedfs_master:
-  seaweedfs_volume:
   grafana_data:
   baget_data:
